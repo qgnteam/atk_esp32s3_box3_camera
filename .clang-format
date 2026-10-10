@@ -1,0 +1,150 @@
+---
+# 按 clang-format 14 的选项语法编写。
+# C 使用 Cpp 格式器；该值不表示将源码编译为 C++。
+Language: Cpp
+
+# 基础风格；未显式配置的选项采用 LLVM 默认值。
+BasedOnStyle: LLVM
+
+# 每级缩进使用 4 个空格。
+IndentWidth: 4
+
+# 表达式、参数等续行的基础缩进宽度。
+ContinuationIndentWidth: 4
+
+# 制表符的显示宽度；不代表允许使用制表符缩进。
+TabWidth: 4
+
+# 不使用制表符，缩进和对齐均使用空格。
+UseTab: Never
+
+# 预处理指令不缩进，即使位于嵌套的条件编译块中。
+IndentPPDirectives: None
+
+# case、default 标签与 switch 对齐，不额外缩进。
+IndentCaseLabels: false
+
+# 目标行宽为 80 列；无法拆分的内容可能超过此限制。
+ColumnLimit: 80
+
+# 大括号换行风格：Allman，程序块的左右大括号各独占一行。
+BreakBeforeBraces: Allman
+
+# 不将短代码块合并到同一行，包括空代码块。
+AllowShortBlocksOnASingleLine: Never
+
+# 不将短函数合并到同一行，包括空函数。
+AllowShortFunctionsOnASingleLine: None
+
+# 不将短 if 语句及其主体合并到同一行。
+AllowShortIfStatementsOnASingleLine: Never
+
+# 不将短循环语句及其主体合并到同一行。
+AllowShortLoopsOnASingleLine: false
+
+# 不将短 case 标签及其语句合并到同一行。
+AllowShortCaseLabelsOnASingleLine: false
+
+# 不将短枚举定义合并到同一行。
+AllowShortEnumsOnASingleLine: false
+
+# 参数等在开括号后换行时，对齐到开括号后的内容。
+AlignAfterOpenBracket: Align
+
+# 多行二元或三元表达式的操作数进行水平对齐。
+AlignOperands: Align
+
+# 对齐连续宏定义的替换内容。
+AlignConsecutiveMacros: true
+
+# 不为了纵向对齐连续赋值的等号而添加额外空格。
+AlignConsecutiveAssignments: false
+
+# 不为了纵向对齐连续声明的变量名而添加额外空格。
+AlignConsecutiveDeclarations: false
+
+# 不为了纵向对齐连续位域声明的冒号而添加额外空格。
+AlignConsecutiveBitFields: false
+
+# 将宏续行末尾的反斜杠尽量右对齐到列宽限制处。
+AlignEscapedNewlines: Right
+
+# 对齐可组成同一组的连续行尾注释。
+AlignTrailingComments: true
+
+# 允许在行宽范围内将多个函数实参放在同一行。
+BinPackArguments: true
+
+# 允许在行宽范围内将多个函数形参放在同一行。
+BinPackParameters: true
+
+# 函数调用需要换行时，允许将全部实参放在下一行。
+AllowAllArgumentsOnNextLine: true
+
+# 不额外允许将函数声明的全部形参整体移到下一行；
+# 最终排版仍由行宽、参数打包和其他换行规则共同决定。
+AllowAllParametersOfDeclarationOnNextLine: false
+
+# 二元表达式换行时，在非赋值运算符前换行；赋值运算符后换行。
+BreakBeforeBinaryOperators: NonAssignment
+
+# 不强制在函数返回类型后换行；必要时仍可因行宽限制换行。
+AlwaysBreakAfterReturnType: None
+
+# 不从现有代码推断指针星号的对齐方式，使用下方固定配置。
+DerivePointerAlignment: false
+
+# 指针声明的星号靠近变量名，如 int *ptr。
+PointerAlignment: Right
+
+# if、for、while 等控制语句的左圆括号前加空格；
+# 普通函数声明和调用的左圆括号前不加空格。
+SpaceBeforeParens: ControlStatements
+
+# 赋值运算符前加空格；运算符后的空格由格式器规则处理。
+SpaceBeforeAssignmentOperators: true
+
+# C 风格类型转换的右括号后不额外加空格，如 (int)value。
+SpaceAfterCStyleCast: false
+
+# 空圆括号内部不加空格，如 Function()。
+SpaceInEmptyParentheses: false
+
+# 圆括号内侧不加空格，如 if (ready)。
+SpacesInParentheses: false
+
+# C 风格类型转换的圆括号内侧不加空格，如 (int)value。
+SpacesInCStyleCastParentheses: false
+
+# 方括号内侧不加空格，如 array[index]。
+SpacesInSquareBrackets: false
+
+# 行尾 // 注释前至少留 1 个空格；对齐注释时可增加空格。
+SpacesBeforeTrailingComments: 1
+
+# 连续空行最多保留 1 行；不会自动补齐程序块前后的空行。
+MaxEmptyLinesToKeep: 1
+
+# 不保留代码块开头紧接左大括号的空行。
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# 不重新折行注释，保留人工安排的注释分行和必要的长注释。
+ReflowComments: false
+
+# 允许将过长字符串拆成相邻字符串字面量，以满足目标行宽。
+BreakStringLiterals: true
+
+# 不自动排序 #include；库类别及包含顺序由人工维护。
+SortIncludes: false
+
+# 保留现有 #include 分组，不合并或重新分组。
+IncludeBlocks: Preserve
+
+# 使用 LF 换行，不使用 Windows 风格的 CRLF 换行。
+UseCRLF: false
+
+# 以下宏的参数对空白敏感，格式器不调整其内部空白。
+WhitespaceSensitiveMacros:
+  - STRINGIZE
+  - PP_STRINGIZE
+...
