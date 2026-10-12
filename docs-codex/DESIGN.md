@@ -1,79 +1,53 @@
-# 摄像头实时预览实现方案
+# 相机拍照、录像与 TF 存储实现方案
 
-更新日期：2026-10-12。当前版本 v1.0 已实现、编译并烧录至 COM4。用户确认“左右已正常，画面流畅”；当前验证结果见 test-report.md。
+更新：2026-10-12；当前版本 `camera-storage v1.2-exfat`。已启用 exFAT 并编译、烧录至 COM4，当前 FAT 卡上的照片/录像完整读回通过；exFAT 卡实测待换卡或用户格式化确认。只读取 docs/AGENTS_CN.md 和 docs/ARCHITECTURE.md，docs 目录不修改；docs/REQUIREMENTS.md、docs/DESIGN.md、docs/TEST.md 不存在。
 
-## 依据与目标
+## 保留的采集和显示基础
 
-已阅读 AGENTS.md、docs/AGENTS_CN.md、docs/ARCHITECTURE.md 和历史板级 GPIO 记录，未修改 docs 目录。docs/REQUIREMENTS.md、docs/DESIGN.md、docs/TEST.md 当前不存在。
+GC0308 RGB565_BE_320x240_20fps_subsample，V4L2 FourCC RGBR，stride=640，153,600 字节/帧。三帧 PSRAM MMAP，由 esp_video 拥有；CameraGet 成功后必须 CameraReturn 一次。取最新有效帧、校验长度和标志，摄像头错误有界恢复，LCD DMA 超时停止访问条缓冲。
 
-本版为 GC0308 → ESP32-S3 → ST7789 本地实时预览：320×240 横屏，上电自动显示，不需要网络。目标显示 ≥20 FPS，最低验收 15 FPS，上电首帧 ≤3 秒。端到端延迟 ≤150 ms 为待实测目标，串口 display_ms 不等于曝光到屏幕的延迟。首版不包含音频、录像、触摸和电池管理。
+ST7789 SPI2 60 MHz，双 40 行内部 DMA 条缓冲，每行按完整 RGB565 像素水平反转。存储使用相同水平映射，不修改采集内存。显示方向为 swap_xy=true、mirror_x=true、mirror_y=false、invert_color=true。I2C SDA3/SCL2，AW9523B 0x59、ID0x23，摄像头电源/复位 XIO14/15，主供电 XIO11、背光 XIO8。不修改电池和音频控制。
 
-## 架构与文件
+## TF 与总线生命周期
 
-```mermaid
-flowchart LR
-    C[GC0308 RGB565大端] --> D[DVP DMA / 三个PSRAM帧]
-    D --> A[application / 取最新帧]
-    A --> B[每行像素反向拷贝 / 双40行条缓冲]
-    B --> L[SPI2 DMA / ST7789]
-    L --> N[完成ISR / 信号量]
-    N --> A
-```
+用户提供 GPIO15/16/17/18，结合已有 LCD 总线解释为 TF SCLK15/MOSI16/MISO17/CS18，需实物核对信号顺序。LCD CS47/DC48。BoardInitSpi 创建唯一 SPI2 总线，在任何通信前拉高两个片选。启动顺序：BoardInit → BoardInitSpi → StorageInit（TF 进入 SPI 模式）→ LcdInit/诊断 → CameraInit → 主循环。
 
-| 文件 | 职责 |
+TF 使用 ESP-IDF SDSPI、20 MHz、FatFs，支持 exFAT/FAT32，挂载 /sdcard，文件目录 DCIM。不自动格式化，卡缺失不阻止预览，按键操作时有限重试。SDK 卸载后将 CS 改成输入，应用恢复 CS18 输出高，避免卡误选影响 LCD。存储模块只卸载卡设备，不释放共用 SPI 总线。运行中不支持安全热拔卡。
+
+IDF v6.1 的 ffconf.h 固定 FF_FS_EXFAT=0，顶层 CMake 从当前 SDK 自动生成 outputs/fatfs_exfat/fatfs 覆盖组件，只修改该副本中的 exFAT开关及 FF_USE_LABEL 布尔定义，保留全部原版权。EXTRA_COMPONENT_DIRS 选择该组件，使 FatFs/VFS/应用使用一致的64位 FSIZE_t 布局。CONFIG_FATFS_LFN_HEAP 默认开启，编译静态断言确认 exFAT与长文件名；不改全局 SDK，不将复制组件纳入 Git。SDK开关形态发生变化时 CMake 明确报错，要求重新审查。挂载后查询实际fs_type并记录，不把启用支持等同于卡已转换格式。
+
+## 模块边界和所有权
+
+| 模块 | 职责 |
 |---|---|
-| main/test.c | app_main 调用 ApplicationStart |
-| main/application.c/.h | 初始化、预览、恢复、错误状态和统计 |
-| main/boards/atk_box3/board.c/.h | I2C、AW9523B 身份、供电、复位、背光 |
-| main/camera/camera_capture.c/.h | V4L2 采集、格式校验、超时、帧归还及停流 |
-| main/display/lcd_display.c/.h | ST7789、DMA 条缓冲、左右修正与传输完成同步 |
-| tools/idf-env.ps1 | 本机 ESP-IDF 工具链入口 |
-| tools/serial_verify.py | 有界串口日志采集及 JSON 统计 |
+| boards/atk_box3/board.* | 电源/I2C、唯一 SPI2 总线及启动片选 |
+| camera/camera_capture.* | V4L2 队列、有效帧借用/归还及恢复 |
+| display/lcd_display.* | LCD 独立设备、DMA 同步、取景红色录像标记 |
+| storage/media_format.* | 与硬件无关的 BMP/AVI 头、小端字段、RGB565 → BGR24 |
+| storage/camera_storage.* | TF 挂载、按键去抖、文件命名、图片/录像、错误收尾 |
+| application.c | 串行调度显示和存储，恢复前结束录像 |
+| tools/test_media_format.py | 实际格式 C 代码的本机 LLVM 执行验证 |
 
-按现有架构分离板级、显示、采集和高层行为。本版状态转换集中在 application.c，未创建空的状态机文件。采用单任务管理帧所有权，DMA 中断只发信号；这取代初稿双任务邮箱，减少同步复杂度。GC0308 原生 RGB565 输出取代初稿 YUV 软件转换，实际验证后优先保持这条较短的数据路径。
+主循环顺序：CameraGet/PreferLatest → LcdDrawFrame（最后 DMA 完成）→ StorageProcess（同步读取当前帧）→ CameraReturn。存储不持有跨帧借用，不转移指针、不归还采集帧。状态和文件仅主任务使用，无额外工作任务。新增 15,360 字节 PSRAM 分块转换缓冲；16 行 BGR24 一次写入，避免整帧转换内存和逐行小写入。串行写卡会降低取景帧率。
 
-## 硬件与依赖
+## 照片和录像格式
 
-esptool 实测 ESP32-S3 revision v0.2、16 MB Flash、8 MB 内置 PSRAM；日志确认 Octal PSRAM 80 MHz、自检通过。扩展器 0x59 读到 AW9523B ID=0x23；GC0308 PID=0x9b。
+BMP：54 字节文件/信息头，320×240、24 位 BGR、底部优先、每行960字节，四字节对齐；每张230454字节。当前 GC0308 不直接输出 JPEG，因此首版采用无损 BMP，无额外软件编码器。
 
-| 接口 | 配置 |
-|---|---|
-| 共用 I2C | SDA GPIO3、SCL GPIO2，100 kHz，摄像头复用句柄 |
-| 摄像头 D0～D7 | GPIO7、8、9、10、11、12、4、5 |
-| 摄像头同步 | VSYNC6、DE/HREF46、PCLK45 |
-| 摄像头供电/复位 | XIO14 / XIO15；低 50 ms，释放后等待 50 ms |
-| 主供电/背光/功放 | XIO11 开，XIO8 低有效背光，XIO5 功放关闭 |
-| LCD SPI2 | SCLK15、MOSI16、MISO17、CS47、DC48，mode 0，60 MHz |
-| LCD 方向及颜色 | swap_xy=true、mirror_x=true、mirror_y=false、invert_color=true、RGB565 大端 |
+AVI：RIFF、hdrl/avih、单个 strl/strh/strf、movi 中 00db 未压缩 BGR24 帧、最终 idx1。Header 共224字节，每帧230400字节加8字节块头及16字节索引。所有字段显式小端，避免结构体对齐。首个索引偏移相对 movi 标识为4；停止时根据完整帧数回填 RIFF/movi 大小、总帧数和实测平均帧周期。无音频，不逐帧保留可变采样间隔；单帧视频使用200ms周期。
 
-AW9523B 输出寄存器为 0x02/03、方向为 0x04/05、GPIO/LED 模式为 0x12/13。历史 TCA95xx 驱动把 0x06/07 用作方向，实际在 AW9523B 上属于中断配置；本版依据芯片身份使用正确寄存器，对必要位读改写并读回校验，保留未使用端口，未照搬全部端口输出掩码。
+录像上限采样5 FPS，不补积压帧，写入结束后至少等待200ms再采样；写卡和取景耗时会使实际帧率更低。60秒或300帧自动停止，最大约69.1MB。文件头用首帧到末帧的实际平均间隔，使正常播放速度接近采样时间。恢复摄像头或退出预览前结束录像。
 
-本机工具链 ESP-IDF v6.1，esp_video 2.5.0、esp_cam_sensor 2.6.0，完整依赖由 dependencies.lock 锁定。本次验证本机 v6.1 安装，换版本需重新验证。组件管理器下载源码至被忽略的 managed_components。
+## 操作与失败处理
 
-采集格式为官方 RGB565_BE_320x240_20fps_subsample，V4L2 FourCC RGBR（RGB565X）、stride=640、153,600 B/帧。实际 FPS 用日志统计，不把格式名的 20fps 当实测。XCLK 引脚 NC，使用板上时钟；历史配置频率 24 MHz，格式表标称 20 MHz，未用示波器测量实际频率。
+BOOT/K0 GPIO0 低有效，稳定40ms去抖。先观察松开才接受操作，短按松开拍照，按住至少800ms后松开切换录像。录像中短按先结束录像再拍照。K1/K2 暂不使用。LCD 右上角12×12红色方块只覆盖显示缓冲，不写进保存内容。
 
-参考：[板厂扩展 IO 示例](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/iic_exio/)、[AWINIC 身份寄存器说明](https://www.awinic.com/cn/faq.html?title=9523)、[esp_video 官方组件](https://components.espressif.com/components/espressif/esp_video/versions/2.5.0/readme?language=en)。
+USB串口 p/r/v 分别触发拍照/录像切换/最近文件读回，与按键使用同一主任务处理路径。不接受外部文件名。启动检查 usb_serial_jtag_is_driver_installed，必要时显式安装驱动并切换VFS输出；读取零等待，安装失败保留物理按键并禁用串口读取。读回在停止录像后以15KiB缓冲读取完整文件，校验头部声明长度、输出CRC，供硬件验证；不据此承诺图像或播放器兼容。
 
-## 初始化和帧生命周期
+图片 IMG00001.BMP、视频 VID00001.AVI，创建前检查已有最终文件，用 O_EXCL 独占创建同名 TMP，重启跳过历史文件及遗留 TMP。不使用实时时钟，不按日期命名。所有数据完整写入、fflush/fsync/fclose成功后才发布最终扩展名。正常停止创建视频索引，部分帧写入失败直接丢弃本次视频，避免错误索引发布。任何写入、同步、关闭、重命名失败均记录、删除本次 TMP、卸载卡并恢复片选；下次操作重新挂载。断电可能遗留 TMP，本版无掉电文件恢复。
 
-启动：检查 PSRAM → 创建 I2C → 验证 AW9523B 并设置供电 → 初始化 SPI/LCD → 短暂红绿蓝诊断 → 摄像头复位、探测和格式验证 → 映射三帧并排队 → 开始采集与显示。
+## 实施与验收
 
-CameraGet 成功后应用取得借用帧，必须 CameraReturn 恰好一次。索引、长度、容量、步长和错误标志检查后才能读取；无效帧也须归还。摄像头组件拥有 MMAP 实际内存，停流、close 设备、esp_video_deinit 后清空指针，不对组件分配调用 free/munmap。
+已完成存储接口、共享 SPI 启动、格式封装、按键、标记、有限录像、错误处理、exFAT覆盖组件、串口测试和完整文件读回、编译及烧录。当前卡实际为FAT：两照片/6秒录像通过，60秒自动停止93帧；具体最终结果见测试报告。检查 .gitignore，不纳入 build、outputs、测试下载依赖或 sdkconfig。测试报告仅记录当前版本。
 
-显示前最多非阻塞替换两张已完成的旧帧，每张丢弃帧归还；随后恢复 1 秒 dequeue 超时，避免无限排队。采集错误或持续 1 秒没有有效帧，停止并重建摄像头；运行期累计最多恢复 3 次，失败进入 ERROR 并显示红色诊断图。LCD 超时停止预览并保留 DMA 缓冲，禁止释放或覆盖在途内存。
-
-## 显示优化与方向修正
-
-内部 RAM 双条缓冲各 320×40×2=25,600 B，共 50 KiB；一帧 6 条。最多一条在途，下一条拷贝可与上一条 DMA 重叠；提交前等待旧事务，最后一条完成后才归还摄像头帧。SPI 不直接访问采集 PSRAM 指针。
-
-on_color_trans_done 仅释放 ISR 安全信号量，需要时显式 portYIELD_FROM_ISR；当前 SPI panel 驱动不消费回调返回值，仅返回 bool 不能保证立即唤醒。40 行条带和显式唤醒解除初次调试时的传输瓶颈。
-
-用户确认画面左右颠倒。实物中传感器镜像位写入后读回仍为 1，最终不依赖该设置：按每行 x←319−x 反向复制完整 RGB565 像素，保持两字节大端顺序，不增加全帧内存或修改原帧。用户已确认修正版“左右已正常，画面流畅”。
-
-## 预算、实施状态与验收
-
-三帧采集 450 KiB PSRAM，加双 DMA 条缓冲 50 KiB 内部 RAM，共 512,000 B 显式像素存储，另计驱动、任务栈和描述符。20 FPS 像素流量 3,072,000 B/s，即 24.576 Mbit/s；60 MHz SPI 理论整帧下限 20.48 ms，实测耗时高于下限。
-
-已完成板级、采集、显示、帧所有权、最新帧策略、异常恢复、统计、左右修正、编译、烧录和用户实物确认。10 分钟连续运行及 20 次 USB 复位启动通过，具体测量及最终镜像身份见当前测试报告。
-
-2 小时连续运行、20 次断电冷启动、硬件故障注入和端到端高速录像计时属于后续扩展验收。软件复位不等于冷启动，display_ms 不等于端到端延迟。SPI 扫描可能撕裂，目前无 TE 同步，不承诺无撕裂。
+当前FAT卡已确认SPI读写、复位后编号递增、串口短录像切换、60秒自动停止、完整文件读回和停止后的30秒24FPS预览。仍待exFAT卡实测、物理按键/显示标记、无卡与卡满故障注入、电脑图片颜色方向及AVI播放、未选中MISO高阻和长时间稳定性。以前的预览性能不能作为本版TF验证结果。

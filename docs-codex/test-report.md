@@ -1,69 +1,61 @@
-# 当前版本实机测试报告
+# 当前版本测试报告
 
-日期：2026-10-12。版本：camera-preview v1.0，320×240 RGB565 大端，显示端水平镜像纠正。结论：编译、烧录、实时预览、10 分钟连续运行及 20 次 USB 复位启动通过；用户确认“左右已正常，画面流畅”。
+日期：2026-10-12。版本：`camera-storage v1.2-exfat`。测试端口：COM4。范围：GC0308 QVGA取景、BMP拍照、无声BGR24 AVI录像、TF SPI存储及exFAT编译支持。
 
-## 环境和交付镜像
+## 结论与实际卡格式
 
-| 项目 | 实际值 |
-|---|---|
-| 工具链 | 本机 ESP-IDF v6.1；Xtensa esp-15.2.0_20251204；esptool 5.5.0 |
-| 摄像头组件 | esp_video 2.5.0、esp_cam_sensor 2.6.0，dependencies.lock 锁定 |
-| 设备连接 | COM4，USB Serial/JTAG |
-| 主控 | ESP32-S3 QFN56 revision v0.2，CPU 240 MHz |
-| Flash | 检测 16 MB，DIO 80 MHz |
-| PSRAM | 检测 8 MB，Octal 80 MHz，启动内存自检通过 |
-| IO 扩展器 | 0x59，ID 0x23；AW9523B 输出、模式与方向读回通过 |
-| 摄像头 | GC0308，PID 0x9b |
-| 采集格式 | RGBR（RGB565X），320×240，stride=640，153,600 B/帧 |
-| 屏幕 | ST7789，SPI2 60 MHz，RGB565 大端，双 40 行 DMA 条缓冲 |
-| 最终应用镜像 | build/box3_camera_preview.bin，0x47fc0 = 294,848 B |
-| 应用分区 | 0x100000 B；镜像尺寸检查通过，余量约 72% |
+最终固件编译、烧录及Flash数据哈希校验通过。当前插入TF卡实际挂载类型为 **FAT**，日志 `TF mounted at /sdcard/DCIM fs=FAT`。已经在此卡完成4张照片、短录像、60秒自动停止录像和每个文件的完整读回。**exFAT代码已启用，但exFAT卡的实物挂载/写入仍未验证**；需用户换入exFAT卡，或明确允许清空当前卡并格式化。程序未格式化当前卡，也未覆盖原有文件。
 
-最终应用 BIN SHA256：`4c567473389741e54d537a722a01118510a796cf78437d20e0061deb99aca6bb`。
+## 构建和烧录证据
 
-最终 ELF SHA256：`4eee30d2e38e9f45f337aaf731974b86f98f4dda70207754eede1271954d92df`。最终串口日志启动摘要为 `4eee30d2e...`，与当前编译产物一致。
+ESP-IDF v6.1，Xtensa esp-15.2.0_20251204；esp_video 2.5.0、esp_cam_sensor 2.6.0。CMake生成项目内FatFs覆盖组件并由build/project_description.json确认实际采用；全局SDK未修改。覆盖FF_FS_EXFAT=1，开启LFN，并修复关闭卷标时的FF_USE_LABEL宏；C静态断言通过。
 
-## 当前版本验证结果
+最终镜像：`build/box3_camera_preview.bin`，384736字节（0x5dee0），1MiB应用分区剩余约63%。SHA256：`cb6a22088adb8cb22f5ab866938e3ba408cff7049775eb05e3b4d31378e4f044`。日志：outputs/build-exfat.log、outputs/flash-exfat.log。最终构建无编译warning/error，烧录日志 `Hash of data verified`。
 
-| 验证项 | 结果与证据 |
-|---|---|
-| 编译 | 最终源码 build 成功；应用和 bootloader 尺寸检查通过；最终构建日志无 C 编译 warning/error |
-| 烧录 | bootloader、partition table、应用写入完成；esptool 写入 Hash 校验通过，复位运行 |
-| 上电/复位启动 | 日志约 1437 ms 完成首帧；应用入口至首帧 912 ms，满足 ≤3 秒目标 |
-| 画面方向和流畅度 | 用户实物确认左右已正常，画面流畅 |
-| 10 分钟连续运行 | 600 秒采集，575 个统计样本，最后累计 14,373 帧，无错误/恢复/崩溃/重启日志 |
-| 显示帧率 | 平均 23.9956 FPS；最低窗口 21.66 FPS，最高 24.00 FPS；满足 ≥20 FPS 目标 |
-| 显示处理/传输时间 | 平均 32.6202 ms/帧；这是软件处理及 LCD 传输，不是端到端延迟 |
-| 有意丢弃旧帧 | 累计 0；当前实测场景显示链路跟上采集 |
-| 数据变化 | 575 个统计样本的 CRC 均不同，采集画面数据持续变化 |
-| 内部可用堆 | 始终 283,215 B，统计窗口未出现持续下降 |
-| PSRAM 可用堆 | 始终 7,923,896 B，统计窗口未出现持续下降 |
-| 重复 USB 复位 | 20/20 次通过，每次应用至首帧 912 ms，并出现 ≥15 FPS 统计；不等同于断电冷启动 |
-| 最终镜像 60 秒确认 | 56 个样本，累计 1398 帧，平均 23.9582 FPS、32.6241 ms；首帧 912 ms，无错误，两个内存池可用堆保持不变 |
-| 文档和源文件 | docs 目录未修改；源文件按 clang-format 排版，保留有效原始归属；各 C/H 文件有效注释占非空行 ≥30% |
-| Git 排除 | build、managed_components、outputs、sdkconfig 与 Python 缓存均忽略；git diff --check 通过 |
+GPIO：TF SCLK15/MOSI16/MISO17/CS18，LCD共用SPI2、CS47。最终固件识别AW9523B ID0x23、GC0308 PID0x9b，RGBR 320×240 stride640，8MiB PSRAM自检通过；应用首帧约993ms。
 
-10 分钟和 20 次复位在最终功能实现上执行；随后仅补充中文功能/同步注释并格式化，重新编译和烧录最终交付镜像。最终镜像另采集 60 秒完成启动与性能确认，结果由 outputs/final-run.json 保存。注释调整不改变预览算法、供电或 DMA 同步流程，错误日志源码行号随之更新。
+## 板上写入与读回
 
-## 实际执行命令与证据位置
+串口p/r/v调用与物理按键相同的存储逻辑，v重新打开最终文件，从头到尾读取并比较BMP/RIFF声明长度，输出CRC。CRC用于记录完整读回内容，不代表与原采集帧逐字节比对，也不能替代肉眼图片或播放器验证。
+
+| 文件 | 内容/长度 | 完整读回CRC | 结果 |
+|---|---|---|---|
+| DCIM/IMG00001.BMP | 230454字节 | 8fdea588 | valid=1 |
+| DCIM/IMG00002.BMP | 230454字节 | 6c79ac05 | valid=1 |
+| DCIM/VID00001.AVI | 10帧，2304472字节 | 2ed4a04e | valid=1 |
+| DCIM/IMG00003.BMP | 230454字节 | b9e77325 | valid=1 |
+| DCIM/IMG00004.BMP | 230454字节 | a2a9cf52 | valid=1 |
+| DCIM/VID00002.AVI | 93帧，21429664字节 | 0109f4c8 | valid=1 |
+
+短录像平均周期664769µs，约1.50FPS；60秒录像平均周期648801µs，约1.54FPS。录像期间取景约8FPS。最大5FPS是采样上限，不是此卡的实测性能承诺。长录像日志RECORD_START在约2504ms，RECORD_STOP约62664ms，约60.16秒自动停止。读回21.4MB文件约23.7秒，这期间取景暂停处理。
+
+两次测试间USB软件复位，第二轮使用IMG00003/04和VID00002，未覆盖第一轮文件。串口测试未操作物理BOOT按键，屏幕标记、照片方向/色彩及桌面播放器兼容尚未人工确认。
+
+命令与日志：
 
 ```powershell
 . ./tools/idf-env.ps1
-Invoke-CameraIdf build
-Invoke-CameraIdf -p COM4 flash
-python tools/serial_verify.py --port COM4 --seconds 600 --reset --log outputs/soak-10min.log
-python tools/verify_boots.py --port COM4 --cycles 20
-python tools/serial_verify.py --port COM4 --seconds 60 --reset --log outputs/final-run.log
+python tools/verify_storage.py --port COM4 --record-seconds 6 --allow-fat --log outputs/storage-current-card.log
+python tools/verify_storage.py --port COM4 --record-seconds 61 --allow-fat --log outputs/storage-auto-stop.log
+python tools/serial_verify.py --port COM4 --seconds 30 --log outputs/preview-exfat-firmware.log
 ```
 
-- outputs/device-id.log：芯片、Flash 和 PSRAM 身份。
-- outputs/build.log、outputs/flash.log：最终构建与烧录记录。
-- outputs/soak-10min.log/.json：连续运行原始日志和汇总。
-- outputs/boot-cycles/boot-01～20.log/.json、summary.json：重复复位验证。
-- outputs/final-run.log/.json：最终交付镜像短时确认。
+两次存储测试JSON `passed=true`、`filesystem=FAT`。默认去掉--allow-fat会要求exFAT，当前卡不能通过该项。
 
-日志属于本地中间证据，按项目要求不加入 Git。本报告记录当前功能版本，未把调试过程中未达标的临时镜像当通过项。
+完成录像和读回后的30秒续采：29个STATS样本，FPS最小/最大/平均均为24.00，display_ms平均32.65，未出现错误、恢复或崩溃。累计帧5824→6524；29种CRC；内部RAM空闲276659字节、PSRAM空闲7905508字节均保持稳定。该项仅覆盖30秒，不替代长时间稳定性测试。
 
-## 验证边界
+## 验证中修复及运行提示
 
-未执行 2 小时稳定性、20 次断电冷启动、硬件断线/掉电故障注入、示波器测量 XCLK 或曝光至 LCD 的高速录像延迟测试。当前结果不能代替这些扩展验收；尤其不能把 32.62 ms 显示传输耗时当作端到端延迟。用户未反馈颜色异常，但本次未用标准色卡量化色彩精度。当前无 TE 同步，不承诺完全无扫描撕裂。
+最初串口输入未响应；改为直接驱动读取时，实机发现默认配置没有安装USB读驱动，触发一次LoadProhibited。最终版本增加is_driver_installed检查、显式驱动安装、VFS切换和读取保护；修复后重新编译烧录，两轮真实存储测试通过。上述失败版本未作为最终交付。最终运行仍出现CS18/CS47由初始GPIO输出移交设备时的冲突提示，卡初始化CMD52/CMD5不支持提示属于普通SD卡探测；没有影响本次成功读写。
+
+主机格式测试此前运行实际C转换代码，覆盖全部65536种RGB565颜色，验证BMP头、12组AVI头及RIFF/idx1偏移；本次未修改格式代码。Git排除build/outputs/sdkconfig/managed_components，覆盖组件、测试依赖和日志不进入Git。
+
+## 尚未完成
+
+- exFAT实物卡挂载、拍照和录像读回。
+- 物理BOOT短按/长按、屏幕红色标记及图片方向颜色确认。
+- 桌面播放器播放AVI，验证显示内容与时间。
+- 无卡/卡满/突然拔卡故障注入、掉电恢复及长时间连续运行。
+- 断电冷启动；当前复位测试仅USB软件复位。
+
+自动写卡及文件读回不能替代以上验收。本版不会自动转换文件系统或格式化卡。

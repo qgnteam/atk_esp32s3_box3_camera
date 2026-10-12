@@ -1,0 +1,5 @@
+menu "BOX3 camera storage"
+    config BOX3_SD_ENABLED
+        bool "Enable TF card on LCD SPI2 bus (CS GPIO18)"
+        default y
+endmenu

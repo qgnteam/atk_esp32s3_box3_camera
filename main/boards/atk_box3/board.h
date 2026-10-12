@@ -28,6 +28,13 @@ esp_err_t BoardInit(i2c_master_bus_handle_t *bus);
 
 /**
  * @authors Codex
+ * @brief 创建 LCD 与 TF 共用 SPI2，并将两路片选保持高电平。
+ * @return ESP_OK 或错误；仅启动调用一次，先于卡和 LCD 初始化。
+ */
+esp_err_t BoardInitSpi(void);
+
+/**
+ * @authors Codex
  * @brief 按 50 ms 低电平及 50 ms 释放执行摄像头复位。
  * @return ESP_OK 或 I2C 错误；仅采集完全停止时可调用。
  */

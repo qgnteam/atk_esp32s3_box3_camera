@@ -19,6 +19,7 @@
 #include "boards/atk_box3/board.h"
 #include "camera/camera_capture.h"
 #include "display/lcd_display.h"
+#include "storage/camera_storage.h"
 
 /* 时间用微秒，统计周期 1 秒；摄像头恢复总次数限定为 3。 */
 #define STATS_PERIOD_US       (1000000)
@@ -163,7 +164,7 @@ void ApplicationStart(void)
     int64_t startup = esp_timer_get_time();
     i2c_master_bus_handle_t bus = NULL;
     unsigned recovery_attempts = 0;
-    ESP_LOGI(kTag, "camera-preview v1.0 state=INITIALIZING");
+    ESP_LOGI(kTag, "camera-storage v1.2-exfat state=INITIALIZING");
     ESP_LOGI(kTag, "PSRAM capacity=%u",
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     esp_err_t result = BoardInit(&bus);
@@ -179,6 +180,17 @@ void ApplicationStart(void)
         return;
     }
 
+    result = BoardInitSpi();
+
+    if (ESP_OK != result)
+    {
+        ESP_LOGE(kTag, "state=ERROR SPI=%s", esp_err_to_name(result));
+        return;
+    }
+
+    /* 最新修改：先初始化 TF 的 SPI 模式，再发送 LCD 初始化命令。
+     * TF 缺失或挂载失败仍允许取景，不会自动格式化用户卡。 */
+    StorageInit();
     result = LcdInit();
     /* LCD 必须先初始化成功，之后才可调用填充和帧绘制。
      * 初始化失败不继续创建采集缓冲，便于定位故障阶段。
@@ -293,6 +305,8 @@ void ApplicationStart(void)
             }
 
             ESP_LOGW(kTag, "capture error=%s", esp_err_to_name(result));
+            /* 恢复前正常封闭已有视频，避免停止采集后遗留打开的文件。 */
+            StorageStop();
             result = RecoverCamera(bus, &recovery_attempts);
 
             if (ESP_OK != result)
@@ -316,7 +330,14 @@ void ApplicationStart(void)
         bool report = (begin - window) >= STATS_PERIOD_US;
         uint32_t crc =
             report ? esp_rom_crc32_le(0, frame.data, frame.length) : 0;
-        result = LcdDrawFrame(frame.data, frame.stride);
+        result = LcdDrawFrame(frame.data, frame.stride, StorageIsRecording());
+        /* 最新修改：等待 LCD DMA 完成后保存当前有效帧。
+         * 存储仅同步读取，归还仍由本循环执行；保存方向与 LCD 相同。
+         * SPI2 共用总线顺序访问，取景帧率会受到写卡耗时影响。 */
+        if (ESP_OK == result)
+        {
+            StorageProcess(&frame);
+        }
         /* 成功返回时最后一条 LCD DMA 已完成。
          * LCD 不长期持有原帧，原帧只在分条拷贝时读取。
          * 即使绘制失败，在途 LCD 访问的也是独立条缓冲。
@@ -331,6 +352,7 @@ void ApplicationStart(void)
                      "state=ERROR draw=%s return=%s; DMA buffers retained",
                      esp_err_to_name(result), esp_err_to_name(returned));
             CameraStop();
+            StorageStop();
             break;
         }
 

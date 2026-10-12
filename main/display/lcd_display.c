@@ -124,16 +124,8 @@ esp_err_t LcdInit(void)
                             "strip allocation");
     }
 
-    spi_bus_config_t bus = {
-        .mosi_io_num = 16,
-        .miso_io_num = 17,
-        .sclk_io_num = 15,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = STRIP_BYTES,
-    };
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO),
-                        kTag, "SPI init");
+    /* 最新修改：SPI2 由 BoardInitSpi 创建，TF 先进入 SPI 模式。
+     * LCD 只创建设备，不再重复创建总线，保留原 DMA 条带策略。 */
     esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_panel_io_spi_config_t config = {
         .cs_gpio_num = 47,
@@ -176,9 +168,10 @@ esp_err_t LcdInit(void)
  * @brief 逐行拷贝摄像头大端像素并提交，覆盖整个屏幕。
  * @param frame 非空采集帧，调用者保证长度满足 stride × 240。
  * @param stride 每行有效跨度，至少 640 字节。
+ * @param recording true 时绘制红色录像标记，仅改变 LCD 条缓冲。
  * @return ESP_OK 或错误；最后一条完成后才成功返回。
  */
-esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride)
+esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride, bool recording)
 {
     /* 输入长度在相机层验证，显示层再次检查指针和每行跨度。
      * 每条固定 40 行，240 行整除，因此没有尾部短条。
@@ -206,6 +199,19 @@ esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride)
                 int source_offset = (PREVIEW_WIDTH - 1 - x) * 2;
                 destination[x * 2] = source[source_offset];
                 destination[(x * 2) + 1] = source[source_offset + 1];
+            }
+
+            /* 最新修改：右上角 12 像素红方块提示录像状态。
+             * 仅修改显示条缓冲，保存照片和视频不会出现此标记。
+             * 四像素边距使状态标记不贴屏幕边缘。
+             * 行复制结束后覆盖，避免正常预览逐像素额外判断。 */
+            if (recording && ((y + row) >= 4) && ((y + row) < 16))
+            {
+                for (int x = PREVIEW_WIDTH - 16; x < PREVIEW_WIDTH - 4; ++x)
+                {
+                    destination[x * 2] = 0xf8;
+                    destination[(x * 2) + 1] = 0x00;
+                }
             }
         }
 

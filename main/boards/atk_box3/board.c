@@ -9,6 +9,8 @@
  */
 #include "board.h"
 
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_check.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,6 +32,36 @@
 static const char *kTag = "board";
 /* 设备句柄仅由启动/预览任务访问，存活至重启，不跨任务共享。 */
 static i2c_master_dev_handle_t s_expander = NULL;
+
+/**
+ * @authors Codex
+ * @brief 先取消两路设备选择，再创建共用 SPI；TF 必须先切换为 SPI 模式。
+ * @return ESP_OK 或初始化错误，不释放总线，存活至重启。
+ */
+esp_err_t BoardInitSpi(void)
+{
+    /* 最新修改：总线所有权移至板级，LCD 和存储只创建设备。
+     * CS18 是用户确认的 TF 卡片选，CS47 是现有 LCD 片选。
+     * 上电先拉高，避免初始化另一设备时误选中。
+     * 最大事务为 40 行 LCD 条带，SD 的 512 字节块也可容纳。
+     * SD 先初始化，避免原生 SD 模式误解后续 LCD 时钟。 */
+    gpio_config_t selects = {
+        .pin_bit_mask = (1ULL << 18) | (1ULL << 47),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&selects), kTag, "SPI chip selects");
+    ESP_RETURN_ON_ERROR(gpio_set_level(GPIO_NUM_18, 1), kTag, "TF deselect");
+    ESP_RETURN_ON_ERROR(gpio_set_level(GPIO_NUM_47, 1), kTag, "LCD deselect");
+    spi_bus_config_t bus_config = {
+        .mosi_io_num = 16,
+        .miso_io_num = 17,
+        .sclk_io_num = 15,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = PREVIEW_WIDTH * 40 * 2,
+    };
+    return spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
+}
 
 /**
  * @authors Codex
