@@ -9,6 +9,7 @@
 #include "lcd_display.h"
 
 #include <string.h>
+#include <stdio.h>
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -18,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "boards/atk_box3/board.h"
+#include "lcd_font.h"
 
 /* 实测 16 行条带受任务唤醒开销限制；改 40 行，双缓冲合计 50 KiB。 */
 #define STRIP_ROWS     (40)
@@ -25,6 +27,7 @@
 #define LCD_TIMEOUT_MS (1000)
 #define LCD_SPI_HZ     (60000000)
 
+static char s_caption[40] = {0};
 static const char *kTag = "lcd";
 static esp_lcd_panel_handle_t s_panel = NULL;
 static SemaphoreHandle_t s_done = NULL;
@@ -32,6 +35,21 @@ static SemaphoreHandle_t s_done = NULL;
 static uint8_t *s_strips[2] = {NULL, NULL};
 static bool s_pending = false;
 static unsigned s_next_strip = 0;
+
+/**
+ * @authors Codex
+ * @brief 使用共享点阵字体绘制当前条带，保持原菜单坐标。
+ * @param strip 非空且不在DMA传输中的内部条缓冲。
+ * @param strip_y 当前条带屏幕起始行，像素。
+ * @param text 非空ASCII文字，不持有调用者指针。
+ * @param text_y 文字在全屏中的纵坐标，像素。
+ * @return None，自动裁剪条带外的部分。
+ */
+static void DrawText(uint8_t *strip, int strip_y, const char *text, int text_y)
+{
+    LcdFontDraw(strip, PREVIEW_WIDTH, STRIP_ROWS, 4, text_y - strip_y, text, 2,
+                0xffff);
+}
 
 /**
  * @authors Codex
@@ -171,7 +189,8 @@ esp_err_t LcdInit(void)
  * @param recording true 时绘制红色录像标记，仅改变 LCD 条缓冲。
  * @return ESP_OK 或错误；最后一条完成后才成功返回。
  */
-esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride, bool recording)
+static esp_err_t DrawPixels(const uint8_t *frame, size_t stride, bool recording,
+                            bool mirror)
 {
     /* 输入长度在相机层验证，显示层再次检查指针和每行跨度。
      * 每条固定 40 行，240 行整除，因此没有尾部短条。
@@ -196,7 +215,7 @@ esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride, bool recording)
 
             for (int x = 0; x < PREVIEW_WIDTH; ++x)
             {
-                int source_offset = (PREVIEW_WIDTH - 1 - x) * 2;
+                int source_offset = (mirror ? (PREVIEW_WIDTH - 1 - x) : x) * 2;
                 destination[x * 2] = source[source_offset];
                 destination[(x * 2) + 1] = source[source_offset + 1];
             }
@@ -211,6 +230,29 @@ esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride, bool recording)
                 {
                     destination[x * 2] = 0xf8;
                     destination[(x * 2) + 1] = 0x00;
+                }
+            }
+        }
+
+        /* 最新修改：标题仅叠加到显示缓冲，照片/录像原像素不受影响。 */
+        if ((y == 0) && (s_caption[0] != '\0'))
+        {
+            memset(strip, 0, PREVIEW_WIDTH * 24 * 2);
+            DrawText(strip, y, s_caption, 4);
+
+            /* 标题背景覆盖后重新绘制红色REC标记，避免被黑色标题遮住。
+             * 标记位于文本最右侧外边距，仍不修改存储像素。 */
+            if (recording)
+            {
+                for (unsigned row = 4; row < 16; ++row)
+                {
+                    for (unsigned x = PREVIEW_WIDTH - 16; x < PREVIEW_WIDTH - 4;
+                         ++x)
+                    {
+                        unsigned offset = (row * PREVIEW_WIDTH + x) * 2;
+                        strip[offset] = 0xf8;
+                        strip[offset + 1] = 0;
+                    }
                 }
             }
         }
@@ -244,6 +286,85 @@ esp_err_t LcdFill(uint16_t rgb565)
         }
 
         ESP_RETURN_ON_ERROR(SubmitStrip(y, strip), kTag, "fill strip");
+    }
+
+    return WaitTransfer();
+}
+
+/**
+ * @authors Codex
+ * @brief 预览保持原方向修正和录像标记，文本仅用于显示。
+ * @param frame 非空大端RGB565帧。
+ * @param stride 每行跨度，字节。
+ * @param recording true绘制录像标记。
+ * @return ESP_OK或传输错误。
+ */
+esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride, bool recording)
+{
+    return DrawPixels(frame, stride, recording, true);
+}
+
+/**
+ * @authors Codex
+ * @brief 回放图像已按文件方向解码，不再次水平镜像。
+ * @param pixels 非空RGB565大端全屏缓冲。
+ * @return ESP_OK或传输错误。
+ */
+esp_err_t LcdDrawImage(const uint8_t *pixels)
+{
+    return DrawPixels(pixels, PREVIEW_WIDTH * 2, false, false);
+}
+
+/**
+ * @authors Codex
+ * @brief 复制模式标题到模块内部，避免持有临时栈字符串。
+ * @param caption 非空字符串，最大39字符。
+ * @return None。
+ */
+void LcdSetCaption(const char *caption)
+{
+    snprintf(s_caption, sizeof(s_caption), "%s", caption);
+}
+
+/**
+ * @authors Codex
+ * @brief 绘制最多8行ASCII菜单，所有条带仍由完成信号保护。
+ * @param lines 非空换行分隔文本，各行最多26个可见字符。
+ * @return ESP_OK或LCD错误。
+ */
+esp_err_t LcdShowText(const char *lines)
+{
+    for (int y = 0; y < PREVIEW_HEIGHT; y += STRIP_ROWS)
+    {
+        uint8_t *strip = s_strips[s_next_strip];
+
+        /* 背景RGB565深蓝0x0008，文字白色，避免浅背景阅读困难。
+         * 所有文字逐行复制至有界临时缓冲，不动态申请内存。
+         * 最后一条DMA完成后才允许存储访问共用SPI总线。 */
+        for (unsigned pixel = 0; pixel < STRIP_BYTES; pixel += 2)
+        {
+            strip[pixel] = 0;
+            strip[pixel + 1] = 8;
+        }
+
+        const char *begin = lines;
+
+        for (unsigned line = 0; (line < 8) && (*begin != '\0'); ++line)
+        {
+            char text[40] = {0};
+            size_t length = strcspn(begin, "\n");
+            size_t count = (length >= sizeof(text)) ? sizeof(text) - 1 : length;
+            memcpy(text, begin, count);
+            DrawText(strip, y, text, 8 + line * 28);
+            begin += length;
+
+            if (*begin == '\n')
+            {
+                ++begin;
+            }
+        }
+
+        ESP_RETURN_ON_ERROR(SubmitStrip(y, strip), kTag, "menu strip");
     }
 
     return WaitTransfer();

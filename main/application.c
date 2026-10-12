@@ -152,7 +152,7 @@ static esp_err_t PreferLatest(CameraFrame *frame, uint32_t *dropped)
  * @authors Codex
  * @brief 自动初始化并显示相机画面，持续统计完整屏幕传输帧率。
  * @return None；致命错误退出循环并保留串口诊断。
- * @note 单任务串行访问板级 I2C、V4L2 和 LCD，仅 DMA 回调发信号。
+ * @note 主任务独占V4L2、文件和LCD；按键/I2S任务使用驱动同步。
  */
 void ApplicationStart(void)
 {
@@ -164,7 +164,7 @@ void ApplicationStart(void)
     int64_t startup = esp_timer_get_time();
     i2c_master_bus_handle_t bus = NULL;
     unsigned recovery_attempts = 0;
-    ESP_LOGI(kTag, "camera-storage v1.2-exfat state=INITIALIZING");
+    ESP_LOGI(kTag, "camera-storage v2.3-keys state=INITIALIZING");
     ESP_LOGI(kTag, "PSRAM capacity=%u",
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     esp_err_t result = BoardInit(&bus);
@@ -189,14 +189,14 @@ void ApplicationStart(void)
     }
 
     /* 最新修改：先初始化 TF 的 SPI 模式，再发送 LCD 初始化命令。
-     * TF 缺失或挂载失败仍允许取景，不会自动格式化用户卡。 */
-    StorageInit();
+     * TF缺失或挂载失败仍允许取景，格式化须实体键双确认。 */
+    StorageInit(bus);
     result = LcdInit();
     /* LCD 必须先初始化成功，之后才可调用填充和帧绘制。
      * 初始化失败不继续创建采集缓冲，便于定位故障阶段。
      * 屏幕方向配置由板级布局决定，相机左右修正另行处理。
      * DMA 条缓冲归显示模块持有，应用不会直接修改它们。
-     * SPI 只使用这一块屏幕，不需要其他任务仲裁显示。 */
+     * SPI由屏幕与TF共用，主任务按顺序访问两个设备。 */
 
     if (ESP_OK != result)
     {
@@ -330,14 +330,11 @@ void ApplicationStart(void)
         bool report = (begin - window) >= STATS_PERIOD_US;
         uint32_t crc =
             report ? esp_rom_crc32_le(0, frame.data, frame.length) : 0;
-        result = LcdDrawFrame(frame.data, frame.stride, StorageIsRecording());
-        /* 最新修改：等待 LCD DMA 完成后保存当前有效帧。
-         * 存储仅同步读取，归还仍由本循环执行；保存方向与 LCD 相同。
-         * SPI2 共用总线顺序访问，取景帧率会受到写卡耗时影响。 */
-        if (ESP_OK == result)
-        {
-            StorageProcess(&frame);
-        }
+        /* 最新修改：主任务先处理三键及存储状态，再按页面绘制。
+         * 音频/按键独立任务不持有摄像头帧，不并发写卡或画屏。
+         * 所有LCD调用都等待最后DMA，文件与显示共用SPI按序访问。 */
+        StorageProcess(&frame);
+        result = StorageDraw(&frame);
         /* 成功返回时最后一条 LCD DMA 已完成。
          * LCD 不长期持有原帧，原帧只在分条拷贝时读取。
          * 即使绘制失败，在途 LCD 访问的也是独立条缓冲。

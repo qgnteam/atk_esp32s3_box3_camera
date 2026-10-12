@@ -16,6 +16,7 @@
 #define MEDIA_HEIGHT           (240)
 #define MEDIA_FRAME_BYTES      (MEDIA_WIDTH * MEDIA_HEIGHT * 3)
 #define MEDIA_AVI_HEADER_BYTES (224)
+#define MEDIA_AV_HEADER_BYTES  (324)
 
 /**
  * @authors Codex
@@ -49,4 +50,17 @@ void MediaConvertRow(const uint8_t *source, uint8_t *output);
  * @return None
  */
 void MediaPut32(uint8_t *output, uint32_t value);
+/**
+ * @authors Codex
+ * @brief 生成双流AVI头，视频BGR24和24kHz/16bit单声道PCM。
+ * @param header 非空324字节输出。
+ * @param frames 视频帧数。
+ * @param period_us 恒定播放帧周期，单位微秒且非零。
+ * @param audio_bytes PCM数据字节数，必须为偶数。
+ * @param movi_bytes movi实际块字节数，不含LIST头和类型标识。
+ * @param chunks idx1条目数，包含视频块和音频块。
+ * @return None；各长度由写入者检查32位范围。
+ */
+void MediaAvHeader(uint8_t *header, uint32_t frames, uint32_t period_us,
+                   uint32_t audio_bytes, uint32_t movi_bytes, uint32_t chunks);
 #endif

@@ -27,6 +27,8 @@
 #define XIO_CAMERA_POWER (1U << 14)
 #define XIO_CAMERA_RESET (1U << 15)
 #define XIO_MAIN_POWER   (1U << 11)
+#define XIO_AUDIO_POWER  ((1U << 12) | (1U << 13))
+#define XIO_KEYS         ((1U << 0) | (1U << 1))
 #define XIO_AMPLIFIER    (1U << 5)
 
 static const char *kTag = "board";
@@ -158,6 +160,11 @@ esp_err_t BoardInit(i2c_master_bus_handle_t *bus)
                         "GPIO mode");
     ESP_RETURN_ON_ERROR(UpdatePair(AW_REG_DIRECTION, outputs, 0), kTag,
                         "outputs");
+    /* 最新修改：K1/K2只配置XIO0/1，保留其他端口方向及充电逻辑。 */
+    ESP_RETURN_ON_ERROR(UpdatePair(AW_REG_MODE, XIO_KEYS, XIO_KEYS), kTag,
+                        "key mode");
+    ESP_RETURN_ON_ERROR(UpdatePair(AW_REG_DIRECTION, XIO_KEYS, XIO_KEYS), kTag,
+                        "key input");
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(kTag, "AW9523B power/mode/direction readback OK");
     return ESP_OK;
@@ -190,4 +197,51 @@ esp_err_t BoardSetBacklight(bool enabled)
 {
     return UpdatePair(AW_REG_OUTPUT, XIO_BACKLIGHT,
                       enabled ? 0 : XIO_BACKLIGHT);
+}
+
+/**
+ * @authors Codex
+ * @brief 读取AW9523B输入寄存器；按键任务不进行写改写。
+ * @param levels 非空电平输出；只有低两位有效。
+ * @return ESP_OK或I2C错误。
+ */
+esp_err_t BoardReadKeys(uint16_t *levels)
+{
+    if (NULL == levels)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return ReadPair(0x00, levels);
+}
+
+/**
+ * @authors Codex
+ * @brief 音频供电使用XIO12/13高有效，初始化后等待100ms稳定。
+ * @return ESP_OK或I2C错误。
+ */
+esp_err_t BoardEnableAudio(void)
+{
+    ESP_RETURN_ON_ERROR(
+        UpdatePair(AW_REG_OUTPUT, XIO_AUDIO_POWER, XIO_AUDIO_POWER), kTag,
+        "audio power");
+    ESP_RETURN_ON_ERROR(
+        UpdatePair(AW_REG_MODE, XIO_AUDIO_POWER, XIO_AUDIO_POWER), kTag,
+        "audio GPIO");
+    ESP_RETURN_ON_ERROR(UpdatePair(AW_REG_DIRECTION, XIO_AUDIO_POWER, 0), kTag,
+                        "audio direction");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return ESP_OK;
+}
+
+/**
+ * @authors Codex
+ * @brief 只修改XIO5，输出保持串行写改写。
+ * @param enabled true为功放供电。
+ * @return ESP_OK或I2C错误。
+ */
+esp_err_t BoardSetAmplifier(bool enabled)
+{
+    return UpdatePair(AW_REG_OUTPUT, XIO_AMPLIFIER,
+                      enabled ? XIO_AMPLIFIER : 0);
 }

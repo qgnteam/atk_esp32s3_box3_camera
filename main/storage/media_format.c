@@ -137,3 +137,55 @@ void MediaConvertRow(const uint8_t *source, uint8_t *output)
         output[(x * 3) + 2] = (red << 3) | (red >> 2);
     }
 }
+
+/**
+ * @authors Codex
+ * @brief 为AVI添加PCM音频流，按实际movi和索引长度填写RIFF。
+ * @param header 非空324字节目标，不与输入重叠。
+ * @param frames 完整视频帧数。
+ * @param period_us 非零播放帧周期，微秒。
+ * @param audio_bytes 完整PCM字节数，16位样本需偶数。
+ * @param movi_bytes 所有音视频块总字节数，含每块8字节头。
+ * @param chunks 完整音视频块总数，每个索引16字节。
+ * @return None。
+ */
+void MediaAvHeader(uint8_t *header, uint32_t frames, uint32_t period_us,
+                   uint32_t audio_bytes, uint32_t movi_bytes, uint32_t chunks)
+{
+    /* 最新修改：复用原视频strl，新增100字节PCM strl。
+     * 视频流仍为00db，音频流01wb，索引依据实际偏移生成。
+     * 不通过结构体序列化，避免编译器对齐改变WAVEFORMAT。
+     * 24kHz单声道16位PCM每秒48000字节，block align=2。
+     * 总视频时长由PCM样本数分配，避免写卡延迟使音轨变速。
+     * PCM无压缩，不依赖运行时音频编码器。 */
+    memset(header, 0, MEDIA_AV_HEADER_BYTES);
+    MediaAviHeader(header, frames, period_us);
+    MediaPut32(header + 4, MEDIA_AV_HEADER_BYTES + movi_bytes + (chunks * 16));
+    MediaPut32(header + 16, 292);
+    MediaPut32(header + 36,
+               (uint32_t)(((uint64_t)MEDIA_FRAME_BYTES * 1000000) / period_us)
+                   + 48000);
+    MediaPut32(header + 56, 2);
+    memcpy(header + 212, "LIST", 4);
+    MediaPut32(header + 216, 92);
+    memcpy(header + 220, "strlstrh", 8);
+    MediaPut32(header + 228, 56);
+    memcpy(header + 232, "auds", 4);
+    MediaPut32(header + 252, 2);
+    MediaPut32(header + 256, 48000);
+    MediaPut32(header + 264, audio_bytes / 2);
+    MediaPut32(header + 268, 15360);
+    MediaPut32(header + 272, UINT32_MAX);
+    MediaPut32(header + 276, 2);
+    memcpy(header + 288, "strf", 4);
+    MediaPut32(header + 292, 16);
+    header[296] = 1; /* WAVE_FORMAT_PCM。 */
+    header[298] = 1; /* 单声道。 */
+    MediaPut32(header + 300, 24000);
+    MediaPut32(header + 304, 48000);
+    header[308] = 2;  /* 16bit单声道块对齐字节数。 */
+    header[310] = 16; /* 每采样16位。 */
+    memcpy(header + 312, "LIST", 4);
+    MediaPut32(header + 316, 4 + movi_bytes);
+    memcpy(header + 320, "movi", 4);
+}

@@ -40,4 +40,25 @@ esp_err_t LcdDrawFrame(const uint8_t *frame, size_t stride, bool recording);
  */
 esp_err_t LcdFill(uint16_t rgb565);
 
+/**
+ * @authors Codex
+ * @brief 设置取景及回放上方状态文字，不修改原始文件像素。
+ * @param caption 非空ASCII字符串，最多39字符，复制后不持有。
+ * @return None，仅主任务调用。
+ */
+void LcdSetCaption(const char *caption);
+/**
+ * @authors Codex
+ * @brief 显示最多8行文字界面，背景深蓝。
+ * @param lines 非空以换行分隔的ASCII文本，每行最多26个可见字符。
+ * @return ESP_OK或LCD错误，必须在LCD初始化后调用。
+ */
+esp_err_t LcdShowText(const char *lines);
+/**
+ * @authors Codex
+ * @brief 显示已经校正方向的RGB565大端图片，不再水平翻转。
+ * @param pixels 非空320x240x2字节，只借用至返回。
+ * @return ESP_OK或LCD错误，等待全部DMA完成。
+ */
+esp_err_t LcdDrawImage(const uint8_t *pixels);
 #endif

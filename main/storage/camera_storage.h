@@ -9,13 +9,15 @@
 #ifndef __CAMERA_STORAGE_H_
 #define __CAMERA_STORAGE_H_
 #include "camera/camera_capture.h"
+#include "driver/i2c_master.h"
 
 /**
  * @authors Codex
- * @brief 初始化 BOOT 输入并尝试挂载 TF；失败保持预览可用。
- * @return None；错误记录在串口，不自动格式化卡。
+ * @brief 初始化三键、音频、TF格式检测和UI；失败保持预览可用。
+ * @param bus 有效共享I2C，不转移所有权。
+ * @return None；格式化必须设备实体键双确认。
  */
-void StorageInit(void);
+void StorageInit(i2c_master_bus_handle_t bus);
 /**
  * @authors Codex
  * @brief 轮询按键并同步保存图片或一帧录像。
@@ -35,4 +37,11 @@ void StorageStop(void);
  * @return true 表示正在录制；仅由同一主任务调用。
  */
 bool StorageIsRecording(void);
+/**
+ * @authors Codex
+ * @brief 根据当前模式显示预览、文件浏览或格式化确认页。
+ * @param frame 非空有效借用帧，不转移所有权。
+ * @return ESP_OK或LCD错误，等待所有DMA完成。
+ */
+esp_err_t StorageDraw(const CameraFrame *frame);
 #endif

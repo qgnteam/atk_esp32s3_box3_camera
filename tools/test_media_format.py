@@ -1,12 +1,13 @@
-"""Compile the actual portable C formatter and verify BMP/AVI bytes on Windows.
+"""Compile the actual portable C formatter and verify BMP/AVI bytes.
 
 No card or board is required. All intermediate artifacts go in ignored outputs.
-Install llvmlite into outputs/host-test-deps before running. Production C format
-and conversion routines are compiled to LLVM IR and executed without changes.
+Windows uses LLVM IR and llvmlite; Linux uses a native shared library.
+Production C format and conversion routines execute without changes.
 """
 import argparse
 import ctypes
 import pathlib
+import os
 import struct
 import subprocess
 import sys
@@ -14,11 +15,35 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cc", default="cc", help="Native C compiler used on Linux")
     parser.add_argument("--clang", default=r"C:\Espressif\tools\esp-clang\esp-21.1.3_20260408\esp-clang\bin\clang.exe")
     args = parser.parse_args()
     root = pathlib.Path(__file__).resolve().parents[1]
     output = root / "outputs" / "media-tests"
     output.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        # Linux 原生编译实际 C 实现，沿用下方相同的格式及全颜色断言。
+        target = output / "media_format.so"
+        subprocess.run([args.cc, "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
+                        "-O0", str(root / "main/storage/media_format.c"),
+                        "-o", str(target)], check=True)
+        library = ctypes.CDLL(str(target))
+    else:
+        library = load_llvm_formatter(root, output, args.clang)
+    exports = ["MediaPut32", "MediaBmpHeader", "MediaAviHeader", "MediaConvertRow", "MediaAvHeader"]
+    byte_pointer = ctypes.POINTER(ctypes.c_uint8)
+    signatures = [[byte_pointer, ctypes.c_uint32], [byte_pointer],
+                  [byte_pointer, ctypes.c_uint32, ctypes.c_uint32], [byte_pointer, byte_pointer],
+                  [byte_pointer] + [ctypes.c_uint32]*5]
+    for name, signature in zip(exports, signatures):
+        function = getattr(library, name)
+        function.argtypes = signature
+        function.restype = None
+
+    verify_formatter(library, output)
+
+
+def load_llvm_formatter(root, output, clang):
     (output / "string.h").write_text(
         "#include <stddef.h>\nvoid *memset(void *, int, size_t);\n"
         "void *memcpy(void *, const void *, size_t);\n", encoding="utf-8")
@@ -27,7 +52,7 @@ def main():
     sys.path.insert(0, str(root / "outputs/host-test-deps"))
     from llvmlite import binding as llvm
     target = output / "media_format.ll"
-    subprocess.run([args.clang, "--target=x86_64-pc-windows-msvc", "-ffreestanding",
+    subprocess.run([clang, "--target=x86_64-pc-windows-msvc", "-ffreestanding",
                     "-fno-builtin", "-O0", "-I", str(output), "-S", "-emit-llvm",
                     str(root / "main/storage/media_format.c"), "-o", str(target)], check=True)
     llvm.initialize_native_target()
@@ -42,15 +67,22 @@ def main():
     module.data_layout = str(machine.target_data)
     engine = llvm.create_mcjit_compiler(module, machine)
     engine.finalize_object()
-    exports = ["MediaPut32", "MediaBmpHeader", "MediaAviHeader", "MediaConvertRow"]
+    exports = ["MediaPut32", "MediaBmpHeader", "MediaAviHeader", "MediaConvertRow", "MediaAvHeader"]
     byte_pointer = ctypes.POINTER(ctypes.c_uint8)
     signatures = [[byte_pointer, ctypes.c_uint32], [byte_pointer],
-                  [byte_pointer, ctypes.c_uint32, ctypes.c_uint32], [byte_pointer, byte_pointer]]
+                  [byte_pointer, ctypes.c_uint32, ctypes.c_uint32], [byte_pointer, byte_pointer],
+                  [byte_pointer] + [ctypes.c_uint32]*5]
     class Functions:
         pass
     library = Functions()
     for name, signature in zip(exports, signatures):
         setattr(library, name, ctypes.CFUNCTYPE(None, *signature)(engine.get_function_address(name)))
+    # 保持执行引擎存活，避免返回后函数地址失效。
+    library.engine = engine
+    return library
+
+
+def verify_formatter(library, output):
 
     def u32(data, offset):
         return struct.unpack_from("<I", data, offset)[0]
@@ -131,6 +163,33 @@ def main():
         assert u32(video, target+4) == u32(video, entry+12)
     (output / "sample.avi").write_bytes(video)
     (output / "sample.bmp").write_bytes(bmp+frame)
+    # 双流头使用独立RIFF遍历验证PCM参数和变长音视频索引。
+    import math
+    pcm = struct.pack("<" + "h"*24000, *(int(8000*math.sin(2*math.pi*440*i/24000)) for i in range(24000)))
+    blocks = [(b"00db", frame), (b"01wb", pcm[:16000]),
+              (b"00db", frame), (b"01wb", pcm[16000:])]
+    chunks = bytearray()
+    index = bytearray()
+    for tag, payload in blocks:
+        index += tag + struct.pack("<III", 16, 4+len(chunks), len(payload))
+        chunks += tag + struct.pack("<I", len(payload)) + payload
+    av_header = (ctypes.c_uint8 * 324)()
+    library.MediaAvHeader(av_header, 2, 500000, len(pcm), len(chunks), len(blocks))
+    av = bytes(av_header) + chunks + b"idx1" + struct.pack("<I", len(index)) + index
+    assert u32(av, 4)+8 == len(av)
+    assert 12+8+u32(av,16) == 312 and av[20:24] == b"hdrl"
+    assert u32(av,56) == 2 and av[232:236] == b"auds"
+    assert (u32(av,252),u32(av,256),u32(av,264),u32(av,276)) == (2,48000,24000,2)
+    assert struct.unpack_from("<HHIIHH",av,296) == (1,1,24000,48000,2,16)
+    assert av[320:324] == b"movi" and u32(av,316) == len(chunks)+4
+    index_start = 324+len(chunks)+8
+    for item, (tag, payload) in enumerate(blocks):
+        entry = index_start+item*16
+        target = 320+u32(av,entry+8)
+        assert av[target:target+4] == av[entry:entry+4] == tag
+        assert u32(av,target+4) == u32(av,entry+12) == len(payload)
+    (output / "sample-av.avi").write_bytes(av)
+    print("PASS: dual stream AVI; PCM 24000/16/mono; variable chunk lengths/index")
     print("PASS: actual C formatter; 65536 RGB565 colours; BMP; 12 AVI headers; RIFF/index offsets")
 
 

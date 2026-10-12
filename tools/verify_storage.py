@@ -1,7 +1,7 @@
 """Run real exFAT photo/video writes and full file readback through USB serial.
 
 Creates new numbered files on the card; never formats or deletes prior files.
-The serial p/r/v commands exercise the same storage path as the BOOT button.
+The serial p/r/v commands exercise the same storage path as the K0 button.
 """
 import argparse
 from collections import deque
@@ -75,10 +75,10 @@ def main():
         try:
             port.dtr = False
             HardReset(port, uses_usb=True)()
-            filesystem = wait_for(r"TF mounted .*fs=(exFAT|FAT)\b").group(1)
+            filesystem = wait_for(r"TF mounted .*fs=(exFAT|FAT32)\b").group(1)
             results["filesystem"] = filesystem
             if filesystem != "exFAT" and not args.allow_fat:
-                raise RuntimeError("card is FAT, not exFAT; card was not formatted")
+                raise RuntimeError("card is FAT32, not exFAT; card was not formatted")
             wait_for(r"FIRST_FRAME")
             photo()
             port.write(b"r\n")
@@ -88,15 +88,16 @@ def main():
                 read_lines()
             if args.record_seconds < 60:
                 port.write(b"r\n")
-            stopped = wait_for(r"RECORD_STOP frames=(\d+) period_us=(\d+)", 25)
-            frames, period = map(int, stopped.groups())
+            stopped = wait_for(r"RECORD_STOP frames=(\d+) period_us=(\d+) audio_bytes=(\d+) chunks=(\d+) audio_valid=(\d+)", 25)
+            frames, period, audio_bytes, chunks, audio_valid = map(int, stopped.groups())
+            assert audio_valid == 1 and audio_bytes > 0 and audio_bytes % 2 == 0
             assert 1 <= frames <= 300 and period > 0
             name = wait_for(r"SAVED (\S+\.AVI)").group(1)
-            results["video"] = {"path": name, "frames": frames, "period_us": period}
+            results["video"] = {"path": name, "frames": frames, "period_us": period, "audio_bytes": audio_bytes, "chunks": chunks}
             port.write(b"v\n")
             checked = wait_for(r"FILE_VERIFY path=(\S+) bytes=(\d+) expected=(\d+) crc=([0-9a-f]+) valid=(\d+)", 45)
             assert checked.group(1) == name and checked.group(5) == "1"
-            assert int(checked.group(2)) == int(checked.group(3)) == 232 + frames*230424
+            assert int(checked.group(2)) == int(checked.group(3)) == 332 + frames*230400 + audio_bytes + chunks*24
             results["checks"].append(checked.group(0))
             photo()
             assert len(set(results["photos"])) == 2

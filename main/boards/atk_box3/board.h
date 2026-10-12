@@ -48,4 +48,27 @@ esp_err_t BoardResetCamera(void);
  */
 esp_err_t BoardSetBacklight(bool enabled);
 
+/**
+ * @authors Codex
+ * @brief 读取已配置为输入的XIO0/1原始电平。
+ * @param levels 非空输出，位0为K1，位1为K2；不转移所有权。
+ * @return ESP_OK或I2C错误；总线驱动负责序列化事务。
+ */
+esp_err_t BoardReadKeys(uint16_t *levels);
+
+/**
+ * @authors Codex
+ * @brief 启用音频模拟供电；不操作电池充电控制。
+ * @return ESP_OK或I2C错误，仅主任务初始化时调用。
+ */
+esp_err_t BoardEnableAudio(void);
+
+/**
+ * @authors Codex
+ * @brief 设置功放，录音时关闭以防反馈。
+ * @param enabled true开启扬声器功放。
+ * @return ESP_OK或I2C错误，仅主任务调用。
+ */
+esp_err_t BoardSetAmplifier(bool enabled);
+
 #endif
