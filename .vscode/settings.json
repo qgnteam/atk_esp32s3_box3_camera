@@ -7,10 +7,13 @@
     "idf.customExtraVars": {
         "IDF_TARGET": "esp32s3"
     },
+    "recommendations": [
+        "espressif.esp-idf-extension",
+    ],
     "clangd.path": "C:\\Espressif\\tools\\esp-clangd\\esp-21.1.3_20260408\\esp-clangd\\bin\\clangd.exe",
     "clangd.arguments": [
       "--background-index",
       "--query-driver=**",
-      "--compile-commands-dir=g:\\project_temp\\xiaozhi-esp32\\test\\build"
+      "--compile-commands-dir=${workspaceFolder}\\build"
     ]
 }
