@@ -1,7 +1,8 @@
 """Execute the production key filter with precise monotonic timestamps.
 
 Tests K2 firing while held at 2 s, no repeat or release confirmation, debounce,
-near-threshold release, K0/K1 polarity and consecutive presses. No GPIO writes.
+near-threshold release, menu K0 confirmation/cancellation and K1/K2 navigation.
+The actual page mapping and preview controls are exercised without GPIO writes.
 """
 import ctypes
 from pathlib import Path
@@ -82,8 +83,8 @@ for level,time_us in ((0,100000),(1,120000),(1,160000)):
     assert sample(s, level, time_us) == 0
 assert not s.pressed
 
-# Both navigation-key polarities retain release-only up/down, even if held 3 s.
-for button, event, idle in ((1,2,1),(0,3,1)):
+# K1 retains release-only up, even if held 3 s.
+for button, event, idle in ((1,2,1),):
     s = new(button, idle)
     for level,time_us in ((1-idle,0),(1-idle,40000),(1-idle,3000000),(idle,3010000)):
         assert sample(s, level, time_us) == 0
@@ -145,6 +146,12 @@ for screen in range(9):
         assert ui.screen==expected_screen
 # Exercise the actual physical-button mapping through the production filter,
 # rather than injecting logical UI events directly.
+lib.CameraUiPhysicalKey.argtypes = [ctypes.c_int, ctypes.c_int]
+lib.CameraUiPhysicalKey.restype = ctypes.c_int
+
+def physical(ui, key):
+    return lib.CameraUiHandle(ctypes.byref(ui), lib.CameraUiPhysicalKey(ui.screen, key))
+
 def tap(button, idle=1):
     key=new(button,idle)
     assert sample(key,1-idle,0)==0
@@ -153,20 +160,79 @@ def tap(button, idle=1):
     return sample(key,idle,140000)
 ui=Ui()
 lib.CameraUiInit(ctypes.byref(ui),False)
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==1  # K2 photograph
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(1))==3 and ui.video  # K1 mode
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==2  # K2 record toggle
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(0))==10 and ui.screen==6  # K0 functions
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==4 and ui.screen==3  # media
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(1))==5  # K1 up
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(0))==6  # K0 down
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==7  # K2 open
+assert physical(ui,tap(2,0))==1  # K2 photograph
+assert physical(ui,tap(1))==3 and ui.video  # K1 mode
+assert physical(ui,tap(2,0))==2  # K2 record toggle
+assert physical(ui,tap(0))==10 and ui.screen==6  # K0 functions
+assert physical(ui,tap(0))==4 and ui.screen==3  # K0 media
+assert physical(ui,tap(1))==6  # K1 down
+assert physical(ui,tap(2,0))==5  # K2 up
+assert physical(ui,tap(0))==7  # K0 open
 ui.screen=4
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==8 and ui.screen==3
-for button in (0,1):
-    key=new(button,1)
+assert physical(ui,tap(0))==8 and ui.screen==3
+# All non-preview pages consistently map physical short and long events.
+for screen in range(1,9):
+    assert lib.CameraUiPhysicalKey(screen,tap(0))==1
+    assert lib.CameraUiPhysicalKey(screen,tap(1))==3
+    assert lib.CameraUiPhysicalKey(screen,tap(2,0))==2
+    assert lib.CameraUiPhysicalKey(screen,5)==4
+
+# Exercise real button taps at every row in both menus. Up decrements,
+# down increments, and the first/last rows wrap without opening an item.
+for screen,count in ((6,3),(7,2)):
+    for selected in range(count):
+        for button,delta,idle in ((1,1,1),(2,-1,0)):
+            ui=Ui()
+            lib.CameraUiInit(ctypes.byref(ui),False)
+            ui.screen=screen
+            ui.menu_selected=selected
+            ui.dirty=False
+            assert physical(ui,tap(button,idle))==0
+            assert ui.screen==screen and ui.dirty
+            assert ui.menu_selected==(selected+delta)%count
+
+# Both menu confirmation levels require K1 YES followed by K0 confirm.
+ui.screen=1
+ui.yes=False
+assert physical(ui,tap(1))==0 and ui.yes
+assert physical(ui,tap(2,0))==0 and not ui.yes  # K2 up selects CANCEL
+assert physical(ui,tap(1))==0 and ui.yes
+assert physical(ui,tap(0))==0 and ui.screen==2 and not ui.yes
+assert physical(ui,tap(1))==0 and ui.yes
+assert physical(ui,tap(0))==9
+
+# K0 cancels every menu page at the deadline; release never confirms again.
+for screen in range(1,9):
+    ui=Ui()
+    lib.CameraUiInit(ctypes.byref(ui),False)
+    ui.screen=screen
+    ui.yes=True
+    key=new(0,1)
     assert sample(key,0,0)==0 and sample(key,0,40000)==0
-    assert sample(key,0,3000000)==0  # Navigation keys never generate cancel.
+    assert physical(ui,sample(key,0,2000000)) in (0,8)
+    assert ui.screen=={3:6,4:3,5:3,7:6,8:7}.get(screen,0)
+    assert sample(key,0,3000000)==0
+    assert sample(key,1,3100000)==0
+    assert sample(key,1,3140000)==0
+    # K2 long is ignored inside menus, never mistaken for cancel or confirm.
+    assert lib.CameraUiPhysicalKey(screen,4)==0
+
+# K0 long in preview does not enter/confirm a menu. K1 never cancels.
+assert lib.CameraUiPhysicalKey(0,5)==0
+key=new(1,1)
+assert sample(key,0,0)==0 and sample(key,0,40000)==0
+assert sample(key,0,3000000)==0
+# A just-below-deadline K0 release is still exactly one short menu confirmation.
+key=new(0,1)
+assert sample(key,0,0)==0 and sample(key,0,40000)==0
+assert sample(key,1,1999999)==0
+assert sample(key,1,2039999)==3
+# Release first observed at the deadline is cancellation, even after a scheduler gap.
+key=new(0,1)
+assert sample(key,0,0)==0 and sample(key,0,40000)==0
+assert sample(key,1,2000000)==5
+assert sample(key,1,2040000)==0
+print("PASS: physical K1 down/K2 up at every function/TF menu row, including wrap")
 print("PASS: actual physical K0/K1/K2 mapping; capture/mode/menu/up/down/confirm/cancel")
-print("PASS: immediate K2 long press through actual UI; no media reopen or format confirmation on release")
+print("PASS: immediate K0/K2 long press through actual UI; no media reopen or format confirmation on release")
 print("PASS: actual C K2 filter; 1.999999s/2s boundary; while-held trigger; no repeat/release confirm; debounce; K0/K1")

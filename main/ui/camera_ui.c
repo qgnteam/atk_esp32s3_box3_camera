@@ -1,10 +1,10 @@
 /**
  * @file camera_ui.c
  * @author Codex
- * @brief K2确认取消、K1上、K0下的模式与格式化确认逻辑。
+ * @brief 按页面映射三键的模式与格式化确认逻辑。
  * @date 2026-10-13
  * @copyright None
- * @note 修改日志：一级功能菜单增加显式返回取景选项；法律信息：None。
+ * @note 修改日志：按页面将菜单K0映射确认/取消、K1/K2映射下上；法律信息：None。
  */
 #include "camera_ui.h"
 #include <stddef.h>
@@ -83,7 +83,7 @@ static CameraUiAction FormatKey(CameraUi *ui, CameraKey key)
 {
     if ((KEY_UP == key) || (KEY_DOWN == key))
     {
-        /* K1向上选取消，K0向下选YES；不因长按而重复翻转选项。 */
+        /* K2向上选取消，K1向下选YES；不因长按而重复翻转选项。 */
         ui->format_yes = (KEY_DOWN == key);
         ui->dirty = true;
     }
@@ -122,11 +122,46 @@ static CameraUiAction FormatKey(CameraUi *ui, CameraKey key)
 
 /**
  * @authors Codex
+ * @brief 在主任务消费处解释实体键，不让输入任务读取UI共享状态。
+ * @details K0进入菜单的事件只在取景解释一次，不会再次确认首项。
+ * 菜单中K2长按不取消；导航仅接受短按，防止持键跨页动作。
+ * K0长按在菜单取消，在取景不触发进入菜单。
+ * @param screen 当前页面，包括启动时的格式提示页。
+ * @param key 原始物理事件，串口模拟事件不得传入。
+ * @return 转换后的逻辑事件，未分配的长按返回KEY_NONE。
+ */
+CameraKey CameraUiPhysicalKey(CameraUiScreen screen, CameraKey key)
+{
+    if (UI_PREVIEW == screen)
+    {
+        return (KEY_K0_CANCEL == key) ? KEY_NONE : key;
+    }
+
+    /* 最新修改：菜单K1下移、K2上移，取景布局及格式化双确认门槛保持一致。 */
+    switch (key)
+    {
+    case KEY_DOWN:
+        return KEY_CONFIRM;
+    case KEY_CONFIRM:
+        return KEY_UP;
+    case KEY_UP:
+        return KEY_DOWN;
+    case KEY_K0_CANCEL:
+        return KEY_CANCEL;
+    case KEY_CANCEL:
+        return KEY_NONE;
+    default:
+        return key;
+    }
+}
+
+/**
+ * @authors Codex
  * @brief 按所在页面解释三键，存储模块负责实际副作用。
  * @details
  * 相同按键的含义由页面确定，不能在菜单中直接拍照。
  * 取景页K2拍照/录像确认，K1模式切换、K0进入功能选择。
- * 菜单页K1向上/K0向下对应前后文件，K2打开媒体。
+ * 菜单页K1向下/K2向上对应前后文件，K0打开媒体。
  * 打开媒体期间确认和返回都关闭并回到列表。
  * 从视频切换文件必须让上层先关闭音轨和释放缓冲。
  * 模式切换返回STOP动作，先封闭现有录像再更新显示。

@@ -1,10 +1,10 @@
 /**
  * @file key_filter.h
  * @author Codex
- * @brief 三键去抖及K2按住2秒即时长按，独立于GPIO和任务调度。
+ * @brief 三键去抖及K0/K2按住2秒即时长按，独立于GPIO和任务调度。
  * @date 2026-10-13
  * @copyright None
- * @note 修改日志：提取有界按键状态供时间边界测试；法律信息：None。
+ * @note 修改日志：增加K0物理长按事件供菜单取消；法律信息：None。
  */
 #ifndef __KEY_FILTER_H_
 #define __KEY_FILTER_H_
@@ -12,8 +12,8 @@
 #include <stdint.h>
 
 /* 时间单位为微秒；长按从首次稳定按下序列的起点计时。
- * 去抖40ms，不额外增加长按阈值，K2达到2秒立即产生取消。
- * K0/K1只在松开时产生上下事件，没有长按重复功能。 */
+ * 去抖40ms，不额外增加长按阈值，K0/K2达到2秒立即产生各自长按事件。
+ * K1只在松开时产生上移；K0长按供菜单取消，没有重复功能。 */
 #define KEY_DEBOUNCE_US   (40000)
 #define KEY_LONG_PRESS_US (2000000)
 
@@ -23,7 +23,8 @@ typedef enum
     KEY_CONFIRM,
     KEY_UP,
     KEY_DOWN,
-    KEY_CANCEL
+    KEY_CANCEL,
+    KEY_K0_CANCEL /* K0长按原始事件，由主任务按当前页面解释。 */
 } CameraKey;
 
 /* 物理键顺序对应GPIO0、XIO0、XIO1，不能当成UI事件编号。 */
@@ -58,12 +59,12 @@ void CameraKeyFilterInit(CameraKeyFilter *filter, int idle_level,
                          CameraButton button);
 /**
  * @authors Codex
- * @brief 去抖并检查K2长按期限，达到2秒时主动返回KEY_CANCEL一次。
+ * @brief 去抖并检查K0/K2长按期限，达到2秒时主动返回对应长按事件一次。
  * @param filter 非空已初始化状态，不允许并发采样。
  * @param level 实际输入电平，0或1，必须是本轮成功读取结果。
  * @param now_us 单调递增采样时间，单位微秒。
  * @return 本轮事件；长按发出后持续按住和松开均返回KEY_NONE。
- * @note K2不足2秒松开仍产生确认；采样周期10ms，截止点误差为一轮。
+ * @note K0/K2不足2秒松开仍产生短按；采样周期10ms，截止点误差为一轮。
  */
 CameraKey CameraKeyFilterSample(CameraKeyFilter *filter, int level,
                                 int64_t now_us);

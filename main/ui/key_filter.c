@@ -1,10 +1,10 @@
 /**
  * @file key_filter.c
  * @author Codex
- * @brief K2长按在按住期间触发，去抖释放不再重复确认。
+ * @brief K0/K2长按在按住期间触发，去抖释放不再重复确认。
  * @date 2026-10-13
  * @copyright None
- * @note 修改日志：2秒期限与长按消费状态；法律信息：None。
+ * @note 修改日志：增加K0独立长按事件，供菜单取消；法律信息：None。
  */
 #include "key_filter.h"
 
@@ -49,7 +49,7 @@ void CameraKeyFilterInit(CameraKeyFilter *filter, int idle_level,
  * @brief 处理一轮真实输入，长按判断独立于松开分支。
  * @details 按下满足40ms去抖后，以候选按下序列起点计时。
  * 候选已松开时不触发按住事件，避免1.99秒松开被误判成长按。
- * K2在候选与稳定电平均为按下时，到2秒立即发出一次取消。
+ * K0/K2在候选与稳定电平均为按下时，到2秒立即发出一次取消。
  * long_sent在发送前置位，持续按住不重复发送，松开不补发确认。
  * 下一次确认按下才清空long_sent，支持连续多次短按/长按。
  * 释放去抖期间保留按下状态，使用首次释放时间判断真实时长。
@@ -58,11 +58,18 @@ void CameraKeyFilterInit(CameraKeyFilter *filter, int idle_level,
  * @param filter 非空且已初始化的串行状态。
  * @param level 本轮有效输入电平。
  * @param now_us 单调采样时间，单位微秒。
- * @return KEY_NONE、短按事件或一次KEY_CANCEL。
+ * @return KEY_NONE、短按事件或一次KEY_CANCEL/KEY_K0_CANCEL。
  */
 CameraKey CameraKeyFilterSample(CameraKeyFilter *filter, int level,
                                 int64_t now_us)
 {
+    /* K0和K2分别保留物理长按身份，页面映射不进入采样任务。 */
+    bool cancellable = (KEY_CONFIRM == filter->short_event)
+                       || (KEY_DOWN == filter->short_event);
+    CameraKey cancel_event = (KEY_DOWN == filter->short_event)
+                                 ? KEY_K0_CANCEL
+                                 : KEY_CANCEL;
+
     if (level != filter->candidate_level)
     {
         filter->candidate_level = level;
@@ -94,12 +101,11 @@ CameraKey CameraKeyFilterSample(CameraKeyFilter *filter, int level,
             }
 
             /* 极端采样中断后的释放保留长按语义，禁止误触发确认。
-             * 正常10ms采样会在按住期间先发出KEY_CANCEL。 */
-            if ((filter->short_event == KEY_CONFIRM)
-                && (held_us >= KEY_LONG_PRESS_US))
+             * 正常10ms采样会在按住期间先发出该物理键的长按事件。 */
+            if (cancellable && (held_us >= KEY_LONG_PRESS_US))
             {
                 filter->long_sent = true;
-                return KEY_CANCEL;
+                return cancel_event;
             }
 
             return filter->short_event;
@@ -112,13 +118,13 @@ CameraKey CameraKeyFilterSample(CameraKeyFilter *filter, int level,
     bool held_until_deadline =
         (filter->candidate_level != filter->idle_level)
         || ((filter->changed_us - filter->pressed_us) >= KEY_LONG_PRESS_US);
-    if ((filter->short_event == KEY_CONFIRM) && filter->pressed
+    if (cancellable && filter->pressed
         && (filter->stable_level != filter->idle_level) && held_until_deadline
         && !filter->long_sent
         && ((now_us - filter->pressed_us) >= KEY_LONG_PRESS_US))
     {
         filter->long_sent = true;
-        return KEY_CANCEL;
+        return cancel_event;
     }
 
     return KEY_NONE;

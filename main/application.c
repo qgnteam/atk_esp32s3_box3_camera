@@ -207,7 +207,7 @@ void ApplicationStart(void)
     int64_t startup = esp_timer_get_time();
     i2c_master_bus_handle_t bus = NULL;
     unsigned recovery_attempts = 0;
-    ESP_LOGI(kTag, "camera-storage v2.8-resume-black state=INITIALIZING");
+    ESP_LOGI(kTag, "camera-storage v2.9-menu-keys state=INITIALIZING");
     ESP_LOGI(kTag, "PSRAM capacity=%u",
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     esp_err_t result = BoardInit(&bus);

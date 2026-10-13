@@ -4,7 +4,7 @@
  * @brief 与硬件无关的相机菜单状态机，格式化必须两次确认。
  * @date 2026-10-13
  * @copyright None
- * @note 修改日志：增加表驱动菜单与TF使用状况页面；法律信息：None。
+ * @note 修改日志：增加实体键按页面转换接口，逻辑状态机保持独立；法律信息：None。
  */
 #ifndef __CAMERA_UI_H_
 #define __CAMERA_UI_H_
@@ -78,6 +78,16 @@ const CameraMenuItem *CameraUiMenuItems(CameraUiScreen screen, unsigned *count);
  * @return None。
  */
 void CameraUiInit(CameraUi *ui, bool unsupported);
+/**
+ * @authors Codex
+ * @brief 将实体按键事件按页面转换为逻辑动作，串口逻辑键不调用此接口。
+ * @param screen 消费事件时的当前页面。
+ * @param key 输入层原始事件，K0短按为DOWN，K2短按为CONFIRM。
+ * @return 取景保留原布局；菜单K0确认/长按取消、K1下、K2上。
+ * @note 无共享状态；长按消费后松开不会在返回页补发确认。
+ */
+CameraKey CameraUiPhysicalKey(CameraUiScreen screen, CameraKey key);
+
 /**
  * @authors Codex
  * @brief 消费一次按键，返回由主任务执行的动作。

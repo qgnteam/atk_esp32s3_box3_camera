@@ -73,7 +73,7 @@ def main():
             port.reset_input_buffer()
             pending = b""
             HardReset(port, uses_usb=True)()
-            wait(r"camera-storage v2\.8-resume-black state=INITIALIZING")
+            wait(r"camera-storage v2\.9-menu-keys state=INITIALIZING")
             wait(r"TF mounted .*fs=(exFAT|FAT32)")
             wait(r"FIRST_FRAME")
             status(0)

@@ -588,7 +588,7 @@ bool LvglMenuRender(const CameraUi *ui, const MediaListView *media,
 
     char title[64] = {0};
     char footer[128] = {0};
-    const char *controls = "K0:DOWN K1:UP K2:OPEN HOLD K2:BACK";
+    const char *controls = "K0:OK K1:DOWN K2:UP HOLD K0:BACK";
 
     switch (ui->screen)
     {
@@ -602,7 +602,7 @@ bool LvglMenuRender(const CameraUi *ui, const MediaListView *media,
         snprintf(title, sizeof(title), "TF CARD USAGE");
         lv_label_set_text(
             s_detail, (NULL != detail) ? detail : "CARD STATUS UNAVAILABLE");
-        controls = "K2:BACK  HOLD K2:BACK";
+        controls = "K0:BACK  HOLD K0:BACK";
         break;
     case UI_FORMAT_PROMPT:
     case UI_FORMAT_CONFIRM:
@@ -623,7 +623,7 @@ bool LvglMenuRender(const CameraUi *ui, const MediaListView *media,
             }
         }
 
-        controls = "K0:YES K1:CANCEL K2:CONFIRM HOLD K2:CANCEL";
+        controls = "K0:OK K1:DOWN K2:UP HOLD K0:CANCEL";
         break;
     }
     case UI_BROWSER:

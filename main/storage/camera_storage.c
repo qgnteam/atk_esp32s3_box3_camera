@@ -1144,7 +1144,7 @@ static void LoadBrowserPage(void)
  * 只接受普通文件，目录和未完成TMP不作为媒体。
  * 浏览函数不改写文件内容，不自动清理断电遗留TMP。
  * 文件个数来自本次扫描，不沿用前一张卡的缓存。
- * 空目录或读取失败清空选择，K2不会打开未知路径。
+ * 空目录或读取失败清空选择，确认键不会打开未知路径。
  * @param direction -1向左，1向右，0选择第一项；边界循环。
  * @return None，目录错误/空目录清空选择，不打开任意外部路径。
  */
@@ -1750,7 +1750,8 @@ void StorageInit(i2c_master_bus_handle_t bus)
     MountCard();
     ESP_LOGI(
         kTag,
-        "UI READY K2=capture/confirm K1=mode/up K0=menu/down holdK2=cancel");
+        "UI READY preview:K2=capture K1=mode K0=menu "
+        "menu:K0=confirm/hold-cancel K1=down K2=up");
 }
 
 /**
@@ -1872,10 +1873,13 @@ void StorageProcess(const CameraFrame *frame)
     }
 
     bool physical = key != KEY_NONE;
+
+    /* 最新修改：仅实体事件按页面换键，串口e/l/n/b继续表示逻辑动作。 */
+    key = CameraUiPhysicalKey(s_ui.screen, key);
     char command = '\0';
     CameraUiAction direct = UI_ACTION_NONE;
 
-    /* e/l/n/b模拟K2确认/K1上移/K0下移/K2长按取消，方便验证与物理键同一状态机。
+    /* e/l/n/b模拟逻辑确认/上移/下移/取消，方便验证与物理键同一状态机。
      * p/r保留旧测试入口，仅在正常取景页允许拍照/录像。
      * 即使主机连续发送确认，也不能执行卡格式化。
      * d导出最近保存文件，v读回CRC，u只查询当前UI状态。 */
@@ -1937,7 +1941,7 @@ void StorageProcess(const CameraFrame *frame)
     }
 
     /* 阻止串口接管格式确认流程，主机测试只检查纯状态机。
-     * 必须通过设备实体按键逐页确认，不能混合串口YES和实体K2。
+     * 必须通过设备实体按键逐页确认，不能混合串口YES和实体K0。
      * 正常卡也可从TF子菜单进入，但两个确认页仍只接受物理键。 */
     if (!physical
         && ((s_ui.screen == UI_FORMAT_PROMPT)
