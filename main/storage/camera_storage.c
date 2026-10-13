@@ -4,7 +4,7 @@
  * @brief 三键相机模式、TF格式确认、BMP/带声音AVI及本机浏览。
  * @date 2026-10-12
  * @copyright None
- * @note 修改日志：2026-10-13加入双确认exFAT格式化和PCM录放；法律信息：None。
+ * @note 修改日志：2026-10-13菜单/回放可在无相机帧时独立处理；法律信息：None。
  */
 #include "camera_storage.h"
 #include <dirent.h>
@@ -40,6 +40,7 @@
 #include "ui/camera_keys.h"
 #include "ui/camera_ui.h"
 #include "ui/media_list.h"
+#include "ui/lvgl_menu.h"
 
 /* 覆盖组件必须对所有FatFs使用者保持相同64位文件长度布局。 */
 _Static_assert(FF_FS_EXFAT == 1, "BOX3 requires exFAT-enabled FatFs");
@@ -79,6 +80,11 @@ static bool s_audio_ready = false;
 static bool s_audio_active = false;
 static CameraUi s_ui = {0};
 static char s_notice[40] = {0};
+/* 诊断从无录像的取景进入，暂停普通LCD重绘，但继续归还相机帧。
+ * 颜色保持到下一条诊断命令；不会写入TF，也不接管格式确认页面。 */
+static bool s_lcd_diagnostic = false;
+static bool s_lcd_reversed = false;
+static uint16_t s_lcd_color = 0;
 /* 快门请求在预览帧归还后执行；提示计时从第一次成功绘制开始。 */
 static bool s_photo_pending = false;
 static int64_t s_saved_until = 0;
@@ -96,6 +102,10 @@ static unsigned s_file_count = 0;
  * 缩略图缓存按页内文件名匹配，同页移动只改变高亮，不重读卡。
  * 这些内存不交给音频任务，也不影响相机借用帧所有权。 */
 static MediaListView s_browser_view = {0};
+/* LVGL通用菜单输出与媒体列表截图分别持有，均位于PSRAM。
+ * 通用缓冲首次进入菜单创建，生命周期至重启，避免反复初始化LVGL。 */
+static uint8_t *s_menu_pixels = NULL;
+static bool s_menu_ready = false;
 static uint8_t *s_browser_pixels = NULL;
 static uint8_t *s_thumbnails = NULL;
 static char s_thumbnail_names[MEDIA_BROWSER_ROWS][MEDIA_BROWSER_NAME_BYTES] = {
@@ -229,6 +239,7 @@ static bool MountCard(void)
     {
         /* 取消后再次拍照/录像或浏览可以重新打开提示，不自动擦除。 */
         s_ui.screen = UI_FORMAT_PROMPT;
+        s_ui.format_return = UI_PREVIEW;
         s_ui.format_yes = false;
         s_ui.dirty = true;
         return false;
@@ -315,6 +326,7 @@ static bool MountCard(void)
                  "TF unsupported result=%u fs_type=%u; confirmation required",
                  status, s_filesystem->fs_type);
         s_ui.screen = UI_FORMAT_PROMPT;
+        s_ui.format_return = UI_PREVIEW;
         s_ui.format_yes = false;
         s_ui.dirty = true;
         snprintf(s_notice, sizeof(s_notice), "UNSUPPORTED TF");
@@ -354,17 +366,65 @@ static bool MountCard(void)
 
 /**
  * @authors Codex
+ * @brief LVGL使用主任务读取的单调毫秒时钟，无中断内GUI操作。
+ * @return 启动以来的毫秒数，32位自然回绕由LVGL处理。
+ */
+static uint32_t MenuTick(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/**
+ * @authors Codex
+ * @brief 首次进入菜单时创建LVGL对象及PSRAM整屏输出。
+ * @return true可绘制；失败清理部分资源，不执行存储动作。
+ * @note LCD尚未初始化也可创建软件显示；实际输出必须在LcdInit后。
+ */
+static bool EnsureMenu(void)
+{
+    if (s_menu_ready)
+    {
+        return true;
+    }
+
+    s_menu_pixels = heap_caps_calloc(1, MEDIA_LIST_BYTES,
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    if (NULL == s_menu_pixels)
+    {
+        return false;
+    }
+
+    s_menu_ready = LvglMenuInit(MenuTick);
+
+    if (!s_menu_ready)
+    {
+        LvglMenuDeinit();
+        free(s_menu_pixels);
+        s_menu_pixels = NULL;
+    }
+
+    if (s_menu_ready)
+    {
+        ESP_LOGI(kTag, "LVGL menu ready 320x240 RGB565");
+    }
+
+    return s_menu_ready;
+}
+
+/**
+ * @authors Codex
  * @brief 双确认后擦除分区并创建exFAT，其他任何路径不调用此函数。
  * @details
  * 动作来自CameraUiHandle的第二层YES确认，不从挂载失败直接调用。
  * 两层确认都由物理按键完成，串口无法设置确认页选择。
  * 第二层页面明确说明全部文件丢失，并再次默认选择取消。
- * 未识别卡或支持格式的卡都不符合s_unsupported前置条件。
+ * 最新修改：菜单双确认允许格式化正常卡；仍要求有效物理卡和卷。
  * 分配工作缓冲失败时不执行任何磁盘擦除。
  * 显示格式化进行中后才调用擦除原语，屏幕DMA已完成。
  * CardFormatExfat以FM_EXFAT固定目标格式，不依赖FatFs自动选择。
  * FM_SFD创建从扇区0开始的整卡单卷，会替换旧分区表。
- * 16KiB分配单位仅影响新卷，不改变已有受支持的卡。
+ * 16KiB分配单位影响新卷，原卡所有数据在用户确认后被清除。
  * 格式化后重新挂载并检查FS_EXFAT，不以调用成功作为唯一依据。
  * 工作缓冲由本函数拥有，每条已分配路径都释放一次。
  * 结束时撤销临时挂载，再通过标准MountCard创建DCIM。
@@ -374,25 +434,42 @@ static bool MountCard(void)
  */
 static bool FormatCard(void)
 {
-    if (!s_unsupported || (NULL == s_card) || (NULL == s_filesystem))
+    if ((!s_unsupported && !s_mounted) || (NULL == s_card)
+        || (NULL == s_filesystem) || (NULL != s_video) || (NULL != s_play_file))
     {
         return false;
     }
 
-    /* 只允许明确发现不支持格式的卡进入此路径。
+    /* 最新修改：正常卷与未知格式卡都可经实体双确认进入此路径。
      * 分区与格式化是破坏操作，必须先结束所有文件及播放。
      * 工作用内部DMA内存，避免底层块写入直接借用PSRAM。
      * 以整卡单分区创建exFAT；成功后重新验证真实fs_type。
-     * 不尝试格式化无卡、IO故障或已支持格式的卡。 */
+     * 不尝试格式化无卡或初始化失败的设备。 */
     uint8_t *work =
         heap_caps_calloc(1, 4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
 
     if (NULL == work)
     {
+        snprintf(s_notice, sizeof(s_notice), "FORMAT MEMORY FAILED");
         return false;
     }
 
-    LcdShowText("FORMATTING EXFAT...\nDO NOT REMOVE CARD\nDO NOT POWER OFF");
+    /* 擦除前确认LVGL警告已绘制并完成LCD DMA；显示失败不擦卡。 */
+    bool shown =
+        EnsureMenu()
+        && LvglMenuMessage(
+            "FORMATTING EXFAT...\nDO NOT REMOVE CARD\nDO NOT POWER OFF",
+            s_menu_pixels);
+    LcdSetCaption("");
+    esp_err_t drawn = shown ? LcdDrawImage(s_menu_pixels) : ESP_ERR_NO_MEM;
+
+    if (ESP_OK != drawn)
+    {
+        free(work);
+        work = NULL;
+        snprintf(s_notice, sizeof(s_notice), "FORMAT DISPLAY FAILED");
+        return false;
+    }
     ESP_LOGW(kTag, "FORMAT_BEGIN explicit physical double confirmation");
     f_mount(NULL, s_drive_path, 0);
     FRESULT status = CardFormatExfat(s_drive_path, work, 4096);
@@ -1541,25 +1618,41 @@ static bool ExportHexBytes(const uint8_t *bytes, size_t size)
 /**
  * @authors Codex
  * @brief 只读导出实际菜单绘制缓冲，主机核对缩略图和高亮位置。
- * @details 仅媒体列表页可导出，照片/录像回放和取景时不导出旧菜单。
+ * @details 支持所有已显示的交互菜单，照片/录像回放和取景时拒绝。
  * 数据就是提交给LcdDrawImage的RGB565大端图像，不重新构造假界面。
  * 全图153600字节，CRC用于检查USB导出数据是否完整。
  * 不创建TF文件，不访问音频任务或改变用户选中项。
  * @return None，成功通过MENU_FRAME_END日志标识。
  */
-static void ExportBrowserFrame(void)
+static void ExportMenuFrame(void)
 {
-    if ((s_ui.screen != UI_BROWSER) || (NULL == s_browser_pixels))
+    /* 最新修改：验证LVGL新页面时也导出实际已提交图像，不重新绘制。
+     * 取景和照片/视频页仍拒绝，防止导出与当前显示无关的旧菜单。
+     * 格式页导出只有读取权限，不改变选择或绕过实体双确认。 */
+    const uint8_t *pixels = NULL;
+
+    if (UI_BROWSER == s_ui.screen)
     {
-        ESP_LOGW(kTag, "MENU_FRAME unavailable: open browser first");
+        pixels = s_browser_pixels;
+    }
+    else if ((UI_MENU == s_ui.screen) || (UI_TF_MENU == s_ui.screen)
+             || (UI_CARD_STATUS == s_ui.screen)
+             || (UI_FORMAT_PROMPT == s_ui.screen)
+             || (UI_FORMAT_CONFIRM == s_ui.screen))
+    {
+        pixels = s_menu_pixels;
+    }
+
+    if (NULL == pixels)
+    {
+        ESP_LOGW(kTag, "MENU_FRAME unavailable: open menu first");
         return;
     }
 
     ESP_LOGI(kTag, "MENU_FRAME_BEGIN bytes=%u crc=%08" PRIx32 " selected=%s",
-             MEDIA_LIST_BYTES,
-             esp_rom_crc32_le(0, s_browser_pixels, MEDIA_LIST_BYTES),
+             MEDIA_LIST_BYTES, esp_rom_crc32_le(0, pixels, MEDIA_LIST_BYTES),
              s_selected);
-    bool valid = ExportHexBytes(s_browser_pixels, MEDIA_LIST_BYTES);
+    bool valid = ExportHexBytes(pixels, MEDIA_LIST_BYTES);
     ESP_LOGI(kTag, "MENU_FRAME_END valid=%d", valid);
 }
 
@@ -1662,6 +1755,77 @@ void StorageInit(i2c_master_bus_handle_t bus)
 
 /**
  * @authors Codex
+ * @brief 处理纯色/坐标对照命令，无录像时才允许进入，不访问磁盘。
+ * @details 大写B/W/R/G/K分别为蓝/白/红/绿/黑；X切换180度方向。
+ * 诊断中除b返回与u状态之外，其他命令全部消费而不执行存储动作。
+ * 退出恢复正常mirror方向，防止后续预览与菜单左右上下颠倒。
+ * @param command 单个串口字符，可为换行。
+ * @return true已消费，false由普通菜单命令处理。
+ * @note 全部状态仅主任务读写，不提供绕过格式确认的入口。
+ */
+static bool DiagnosticCommand(char command)
+{
+    bool color_command = (command == 'B') || (command == 'W')
+                         || (command == 'R') || (command == 'G')
+                         || (command == 'K');
+
+    if (!s_lcd_diagnostic)
+    {
+        if (!color_command || (UI_PREVIEW != s_ui.screen) || (NULL != s_video)
+            || s_photo_pending)
+        {
+            return false;
+        }
+
+        s_lcd_diagnostic = true;
+        s_lcd_reversed = false;
+    }
+
+    /* 诊断的选择只改变LCD，不触发拍照、录像、挂载或格式化。
+     * 任一正常命令也不能在保持画面期间后台写卡。 */
+    switch (command)
+    {
+    case 'B':
+        s_lcd_color = 0x001f; /* RGB565的全部五位蓝色。 */
+        break;
+    case 'W':
+        s_lcd_color = 0xffff; /* RGB三个分量均为最大值。 */
+        break;
+    case 'R':
+        s_lcd_color = 0xf800;
+        break;
+    case 'G':
+        s_lcd_color = 0x07e0;
+        break;
+    case 'K':
+        s_lcd_color = 0x0000;
+        break;
+    case 'X':
+        s_lcd_reversed = !s_lcd_reversed;
+        break;
+    case 'b':
+        s_lcd_diagnostic = false;
+        s_lcd_reversed = false;
+        /* 恢复方向也走经过验证的同步纯色路径，再恢复普通预览。 */
+        LcdDiagnosticFill(s_lcd_color, false);
+        s_ui.dirty = true;
+        ESP_LOGI(kTag, "LCD_TEST_EXIT");
+        return true;
+    case 'u':
+        ESP_LOGI(kTag, "LCD_TEST_STATUS color=%04x reversed=%d", s_lcd_color,
+                 s_lcd_reversed);
+        return true;
+    default:
+        /* 保持画面，丢弃普通操作和换行，不重复绘制或写卡。 */
+        return true;
+    }
+
+    s_ui.dirty = true;
+    return true;
+}
+
+/**
+ * @authors Codex
  * @brief 主任务串行执行状态机动作；串口不能执行真实格式化。
  * @details
  * 只有尺寸完整的有效借用帧可以触发拍照或录像帧写入。
@@ -1682,21 +1846,31 @@ void StorageInit(i2c_master_bus_handle_t bus)
  * 回放结束后等待音频任务退出，再返回媒体列表。
  * 恢复或退出由application调用StorageStop，不能遗留录音文件。
  * 本函数从不归还frame，所有权仍由application统一处理。
- * @param frame 当前有效借用相机帧，所有权仍在application。
+ * @param frame 采集中为有效借用帧，菜单/回放/诊断可为NULL，所有权仍在application。
  * @return None，错误保留预览及诊断。
  */
 void StorageProcess(const CameraFrame *frame)
 {
-    if ((NULL == frame) || !frame->valid || (NULL == frame->data)
-        || (frame->stride < MEDIA_WIDTH * 2)
-        || (frame->length
-            < ((MEDIA_HEIGHT - 1) * frame->stride + MEDIA_WIDTH * 2))
-        || (NULL == s_pixels) || (NULL == s_index))
+    if ((NULL == s_pixels) || (NULL == s_index))
     {
         return;
     }
 
+    /* 最新修改：暂停采集的菜单轮询传NULL，输入和媒体时钟继续工作。
+     * 仅拍照/录制的像素路径要求真实帧，禁止把空帧当作图像读取。 */
+    bool valid_frame = (NULL != frame) && frame->valid && (NULL != frame->data)
+                       && (frame->stride >= MEDIA_WIDTH * 2)
+                       && (frame->length >= ((MEDIA_HEIGHT - 1) * frame->stride
+                                             + MEDIA_WIDTH * 2));
+
     CameraKey key = CameraKeysRead();
+    /* 实体K2长按仍可退出诊断，短按和上下不触发拍照/录像。 */
+    if (s_lcd_diagnostic && (KEY_CANCEL == key))
+    {
+        DiagnosticCommand('b');
+        return;
+    }
+
     bool physical = key != KEY_NONE;
     char command = '\0';
     CameraUiAction direct = UI_ACTION_NONE;
@@ -1708,6 +1882,11 @@ void StorageProcess(const CameraFrame *frame)
     if (!physical && s_console_ready
         && (usb_serial_jtag_read_bytes(&command, 1, 0) == 1))
     {
+        if (DiagnosticCommand(command))
+        {
+            return;
+        }
+
         switch (command)
         {
         case 'e':
@@ -1737,23 +1916,29 @@ void StorageProcess(const CameraFrame *frame)
             ExportSavedFile();
             break;
         case 't':
-            ExportBrowserFrame();
+            ExportMenuFrame();
             break;
         case 'u':
             ESP_LOGI(kTag,
                      "UI_STATUS screen=%u mode=%s selected=%s mounted=%d "
-                     "unsupported=%d yes=%d",
+                     "unsupported=%d yes=%d streaming=%d captures=%lu",
                      s_ui.screen, s_ui.video_mode ? "VIDEO" : "PHOTO",
-                     s_selected, s_mounted, s_unsupported, s_ui.format_yes);
+                     s_selected, s_mounted, s_unsupported, s_ui.format_yes,
+                     CameraIsStreaming(), (unsigned long)CameraGetCount());
             break;
         default:
             break; /* 换行和未知字符无动作。 */
         }
     }
 
+    if (s_lcd_diagnostic)
+    {
+        return;
+    }
+
     /* 阻止串口接管格式确认流程，主机测试只检查纯状态机。
      * 必须通过设备实体按键逐页确认，不能混合串口YES和实体K2。
-     * 当前卡已为FAT32/exFAT时根本不会进入这两个页面。 */
+     * 正常卡也可从TF子菜单进入，但两个确认页仍只接受物理键。 */
     if (!physical
         && ((s_ui.screen == UI_FORMAT_PROMPT)
             || (s_ui.screen == UI_FORMAT_CONFIRM)))
@@ -1783,6 +1968,11 @@ void StorageProcess(const CameraFrame *frame)
     switch (action)
     {
     case UI_ACTION_PHOTO:
+        if (!valid_frame)
+        {
+            break;
+        }
+
         s_notice[0] = '\0';
         s_saved_until = 0;
         s_photo_pending = true;
@@ -1791,6 +1981,11 @@ void StorageProcess(const CameraFrame *frame)
         ESP_LOGI(kTag, "PHOTO_FEEDBACK requested");
         break;
     case UI_ACTION_RECORD:
+        if (!valid_frame)
+        {
+            break;
+        }
+
         if (NULL != s_video)
         {
             StorageStop();
@@ -1799,6 +1994,30 @@ void StorageProcess(const CameraFrame *frame)
         {
             StartVideo();
         }
+        break;
+    case UI_ACTION_MENU:
+        ReleaseBrowser();
+        s_notice[0] = '\0';
+        break;
+    case UI_ACTION_STATUS:
+        /* 查询失败只显示状态，不从使用状况页面启动格式化。 */
+        if ((NULL == s_card) && !s_mounted)
+        {
+            MountCard();
+        }
+        s_ui.screen = UI_CARD_STATUS;
+        break;
+    case UI_ACTION_FORMAT_REQUEST:
+        /* 菜单入口允许正常卡主动格式化，无物理卡时禁止确认流程。 */
+        if ((NULL == s_card) && !s_mounted)
+        {
+            MountCard();
+        }
+        s_ui.format_return = UI_TF_MENU;
+        s_ui.format_yes = false;
+        s_ui.screen = ((NULL != s_card) && (s_mounted || s_unsupported))
+                          ? UI_FORMAT_PROMPT
+                          : UI_TF_MENU;
         break;
     case UI_ACTION_LIST:
         SelectFile(0);
@@ -1813,9 +2032,8 @@ void StorageProcess(const CameraFrame *frame)
         OpenSelected();
         break;
     case UI_ACTION_FORMAT:
-        if (physical)
+        if (physical && CloseViewer())
         {
-            CloseViewer();
             FormatCard();
         }
         break;
@@ -1826,12 +2044,21 @@ void StorageProcess(const CameraFrame *frame)
         break; /* 未知动作无磁盘副作用。 */
     }
 
-    if ((action == UI_ACTION_CLOSE) && (s_ui.screen == UI_PREVIEW))
+    if ((action == UI_ACTION_CLOSE)
+        && ((s_ui.screen == UI_PREVIEW) || (s_ui.screen == UI_MENU)))
     {
         ReleaseBrowser();
     }
 
     int64_t now = esp_timer_get_time();
+
+    /* 空帧不得进入录像像素写入；正常菜单入口已结束录像。
+     * 该保护用于异常调用顺序，不能在停流期间发布损坏视频。 */
+    if ((NULL != s_video) && !valid_frame)
+    {
+        AbortVideo();
+        return;
+    }
 
     if (NULL != s_video)
     {
@@ -1914,16 +2141,32 @@ void StorageProcess(const CameraFrame *frame)
  * 绘制错误传播给application，由应用停止外设访问。
  * 默认取消用选择标记明确显示，YES不是预选项。
  * 格式确认页说明清空全部文件，而非普通保存确认。
- * UI字体为独立5x7英文点阵，不增加大字体库依赖。
- * @param frame 非空有效帧，不转移所有权。
+ * 菜单字体采用LVGL Montserrat 12/14，取景叠字继续使用5x7点阵。
+ * @param frame 取景为非空有效帧；菜单/回放/诊断可为NULL，不转移所有权。
  * @return ESP_OK或LCD错误，菜单未变化时无需刷屏。
  */
 esp_err_t StorageDraw(const CameraFrame *frame)
 {
     char text[320] = {0};
 
+    if (s_lcd_diagnostic)
+    {
+        if (!s_ui.dirty)
+        {
+            return ESP_OK;
+        }
+
+        s_ui.dirty = false;
+        return LcdDiagnosticFill(s_lcd_color, s_lcd_reversed);
+    }
+
     if (s_ui.screen == UI_PREVIEW)
     {
+        if ((NULL == frame) || !frame->valid || (NULL == frame->data))
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+
         /* 只有实际显示过成功提示才开始计时，不把写卡时间计入。 */
         if ((s_saved_until > 0) && (esp_timer_get_time() >= s_saved_until))
         {
@@ -1975,37 +2218,63 @@ esp_err_t StorageDraw(const CameraFrame *frame)
         return (NULL != s_view) ? LcdDrawImage(s_view) : ESP_ERR_INVALID_STATE;
     }
 
-    if (s_ui.screen == UI_FORMAT_PROMPT)
+    /* 最新修改：全部交互菜单交给LVGL lv_menu；保留直接取景/回放DMA。
+     * 状态机及文件系统授权不进入LVGL回调，所有副作用仍由主任务执行。 */
+    if (!EnsureMenu())
     {
-        snprintf(text, sizeof(text),
-                 "TF FORMAT UNSUPPORTED\nNEED EXFAT OR FAT32\nFORMAT AS "
-                 "EXFAT?\n\n%s CANCEL   %s YES\nK1:UP "
-                 "K0:DOWN\nK2:CONFIRM\nHOLD K2:CANCEL",
-                 s_ui.format_yes ? " " : ">", s_ui.format_yes ? ">" : " ");
+        return ESP_ERR_NO_MEM;
     }
-    else if (s_ui.screen == UI_FORMAT_CONFIRM)
+
+    if (UI_CARD_STATUS == s_ui.screen)
     {
-        snprintf(text, sizeof(text),
-                 "WARNING: ERASE ALL DATA\nALL FILES WILL BE LOST\nFORMAT "
-                 "EXFAT NOW?\n\n%s CANCEL   %s YES\nK1:UP "
-                 "K0:DOWN\nK2:CONFIRM\nHOLD K2:CANCEL",
-                 s_ui.format_yes ? " " : ">", s_ui.format_yes ? ">" : " ");
-    }
-    else
-    {
-        if (NULL == s_browser_pixels)
+        DWORD free_clusters = 0;
+        FATFS *filesystem = NULL;
+        FRESULT status =
+            s_mounted ? f_getfree(s_drive_path, &free_clusters, &filesystem)
+                      : FR_NOT_READY;
+
+        if ((FR_OK == status) && (NULL != filesystem))
         {
-            return LcdShowText(
-                "MEDIA LIST\nPREVIEW MEMORY ERROR\nHOLD K2: CANCEL");
+            /* SD扇区固定512字节；64位运算支持大容量卡，显示卷数据区MiB。 */
+            const uint64_t cluster_bytes = (uint64_t)filesystem->csize * 512;
+            const uint64_t total =
+                (uint64_t)(filesystem->n_fatent - 2) * cluster_bytes;
+            const uint64_t available = (uint64_t)free_clusters * cluster_bytes;
+            snprintf(text, sizeof(text),
+                     "FS: %s\nTOTAL: %llu MiB\nUSED: %llu MiB\nFREE: %llu MiB",
+                     (FS_EXFAT == filesystem->fs_type) ? "exFAT" : "FAT32",
+                     (unsigned long long)(total / (1024 * 1024)),
+                     (unsigned long long)((total - available) / (1024 * 1024)),
+                     (unsigned long long)(available / (1024 * 1024)));
         }
-
-        s_browser_view.notice = s_notice;
-        MediaListRender(&s_browser_view, s_browser_pixels);
-        LcdSetCaption("");
-        return LcdDrawImage(s_browser_pixels);
+        else
+        {
+            snprintf(text, sizeof(text), "%s\nQUERY RESULT: %u",
+                     s_unsupported ? "UNSUPPORTED FILESYSTEM"
+                                   : "NO CARD / IO ERROR",
+                     status);
+        }
     }
 
-    return LcdShowText(text);
+    uint8_t *output = s_menu_pixels;
+    const MediaListView *media = NULL;
+
+    if (UI_BROWSER == s_ui.screen)
+    {
+        s_browser_view.notice = s_notice;
+        media = (NULL != s_browser_pixels) ? &s_browser_view : NULL;
+        output = (NULL != s_browser_pixels) ? s_browser_pixels : s_menu_pixels;
+    }
+
+    if (!LvglMenuRender(&s_ui, media, text, s_notice, output))
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* 输出和现有菜单截图共用同一真实帧，最后DMA完成后才允许读TF。
+     * 清空回放标题，避免传统LCD叠字覆盖LVGL页眉。 */
+    LcdSetCaption("");
+    return LcdDrawImage(output);
 }
 
 /**
@@ -2089,4 +2358,17 @@ esp_err_t StorageCapturePending(i2c_master_bus_handle_t bus)
     esp_err_t stopped = CameraStop();
     LcdSetFlash(false);
     return (ESP_OK == stopped) ? CameraInit(bus) : stopped;
+}
+
+/**
+ * @authors Codex
+ * @brief 仅取景需要实时相机帧；回放读取媒体自己的RGB565和音轨。
+ * @details 摄像头停止由应用在所有借用帧归还后执行，UI不拥有设备。
+ * 纯色诊断也不读取相机，因此可减少测试期间的DMA和PSRAM流量。
+ * 格式化提示、确认和卡状态均允许无帧轮询，不依赖传感器健康。
+ * @return true正常取景；false功能菜单、确认、回放及纯色保持。
+ */
+bool StorageNeedsCapture(void)
+{
+    return (UI_PREVIEW == s_ui.screen) && !s_lcd_diagnostic;
 }

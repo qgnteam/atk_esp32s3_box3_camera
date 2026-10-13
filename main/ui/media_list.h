@@ -1,10 +1,10 @@
 /**
  * @file media_list.h
  * @author Codex
- * @brief 四行缩略图列表的纯RGB565绘制模型，不操作文件或LCD。
+ * @brief 供LVGL菜单使用的四行缩略图列表模型，不操作文件或LCD。
  * @date 2026-10-13
  * @copyright None
- * @note 修改日志：新增列表界面；法律信息：None。
+ * @note 修改日志：移除传统绘制接口，模型由LVGL使用；法律信息：None。
  */
 #ifndef __MEDIA_LIST_H_
 #define __MEDIA_LIST_H_
@@ -24,13 +24,4 @@ typedef struct
     const char *notice; /* 借用非空提示字符串，不长期持有。 */
 } MediaListView;
 
-/**
- * @authors Codex
- * @brief 绘制四行文件列表、选中高亮、页序及操作提示。
- * @param view 非空模型，最多四行，每个名称终止于32字节内。
- * @param pixels 非空至少MEDIA_LIST_BYTES字节，调用者持有。
- * @return None，参数无效时保留清空背景，不读取越界缩略图。
- * @note 只读借用预览，渲染结束即可释放模型；不修改媒体文件。
- */
-void MediaListRender(const MediaListView *view, uint8_t *pixels);
 #endif

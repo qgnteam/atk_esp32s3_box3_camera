@@ -74,4 +74,30 @@ esp_err_t CameraSetTimeout(unsigned milliseconds);
  */
 esp_err_t CameraStop(void);
 
+/**
+ * @authors Codex
+ * @brief 无借用帧时停止采集DMA，保留设备、格式及映射缓冲。
+ * @return ESP_OK已暂停，ESP_ERR_INVALID_STATE仍有借用帧，其他为驱动错误。
+ * @note 主任务调用；失败不能假定DMA已停止，不释放在途资源。
+ */
+esp_err_t CameraPause(void);
+/**
+ * @authors Codex
+ * @brief 将停流时清空的三个缓冲重新排队并恢复DMA采集。
+ * @return ESP_OK采集中；失败由调用者停设备并执行有限恢复。
+ * @note 不重置传感器或重新分配图像；仅主任务且无借用帧调用。
+ */
+esp_err_t CameraResume(void);
+/**
+ * @authors Codex
+ * @brief 查询驱动采集状态，供主任务调度及只读诊断。
+ * @return true表示STREAMON成功且尚未成功STREAMOFF。
+ */
+bool CameraIsStreaming(void);
+/**
+ * @authors Codex
+ * @brief 查询累计成功取帧次数，暂停期间不得增加。
+ * @return 累计次数，32位自然回绕；只在主任务读取。
+ */
+uint32_t CameraGetCount(void);
 #endif

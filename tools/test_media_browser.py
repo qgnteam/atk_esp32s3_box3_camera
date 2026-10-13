@@ -1,4 +1,4 @@
-"""Run actual C pagination, thumbnail decoding and list rendering on the host.
+"""Run actual C pagination and thumbnail decoding on the host.
 
 All fixtures and render artifacts are created inside ignored outputs. Tests
 never open /dev devices or alter the board's TF card.
@@ -18,8 +18,7 @@ subprocess.run(["cc", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror", "-O1",
                 "-I", str(ROOT / "main"),
                 *(str(ROOT / name) for name in (
                     "main/storage/media_browser.c", "main/storage/media_thumbnail.c",
-                    "main/storage/media_format.c", "main/ui/media_list.c",
-                    "main/display/lcd_font.c")),
+                    "main/storage/media_format.c")),
                 "-o", str(OUT / "browser.so")], check=True)
 lib = ctypes.CDLL(str(OUT / "browser.so"))
 Byte = ctypes.c_uint8
@@ -32,22 +31,14 @@ class Page(ctypes.Structure):
                 ("selected_index", ctypes.c_uint), ("file_count", ctypes.c_uint)]
 
 
-class View(ctypes.Structure):
-    _fields_ = [("page", Page), ("thumbnails", Pointer * 4),
-                ("valid", ctypes.c_bool * 4), ("notice", ctypes.c_char_p)]
-
-
 lib.MediaBrowserReadPage.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(Page)]
 lib.MediaBrowserReadPage.restype = ctypes.c_bool
 lib.MediaThumbnailRead.argtypes = [ctypes.c_char_p, Pointer, Pointer, ctypes.c_size_t]
 lib.MediaThumbnailRead.restype = ctypes.c_bool
-lib.MediaListRender.argtypes = [ctypes.POINTER(View), Pointer]
-lib.MediaListRender.restype = None
 lib.MediaBmpHeader.argtypes = [Pointer]
 lib.MediaAvHeader.argtypes = [Pointer] + [ctypes.c_uint32] * 5
 lib.MediaAviHeader.argtypes = [Pointer, ctypes.c_uint32, ctypes.c_uint32]
-lib.LcdFontDraw.argtypes = [Pointer, ctypes.c_uint, ctypes.c_uint, ctypes.c_int,
-                           ctypes.c_int, ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint16]
+
 
 results = {}
 with tempfile.TemporaryDirectory(dir=OUT) as directory:
@@ -169,40 +160,5 @@ with tempfile.TemporaryDirectory(dir=OUT) as directory:
     results["thumbnail"] = {"formats": ["BMP", "legacy AVI", "PCM-before-video AVI"],
                             "pixels_checked_per_format": 48*36, "rejected_fixtures": len(invalids)}
 
-    # Render with production C code; guards catch layout writes outside the frame.
-    view = View()
-    for row, name in enumerate((b"IMG00001.BMP",b"IMG00002.BMP",b"VID00001.AVI",b"BROKEN.AVI")):
-        view.page.names[row].value = name
-    view.page.count = 4
-    view.page.selected_row = 2
-    view.page.selected_index = 6
-    view.page.file_count = 13
-    view.notice = b""
-    keep_alive = [(Byte * 3456).from_buffer_copy(previews[0]) for _ in range(3)]
-    for row in range(3):
-        view.thumbnails[row] = keep_alive[row]
-        view.valid[row] = True
-    render = (Byte * (153600+16))(*([0xA5]*(153600+16)))
-    target = ctypes.cast(ctypes.byref(render,8),Pointer)
-    lib.MediaListRender(ctypes.byref(view),target)
-    assert bytes(render[:8]) == bytes(render[-8:]) == b"\xA5"*8
-    pixels = bytes(render[8:-8])
-    for row in range(3):
-        y = 28+row*44+4
-        for dy in range(36):
-            expected = previews[0][dy*96:(dy+1)*96]
-            offset = ((y+dy)*320+8)*2
-            assert pixels[offset:offset+96] == expected
-    assert int.from_bytes(pixels[((28+2*44)*320+4)*2:((28+2*44)*320+4)*2+2],"big") == 0x07FF
-    # Font clipping on every edge must preserve the frame guards.
-    for x,y in ((-4,-4),(318,239),(-320,-240),(0,40)):
-        lib.LcdFontDraw(target,320,240,x,y,b"TEST",2,0xFFFF)
-        assert bytes(render[:8]) == bytes(render[-8:]) == b"\xA5"*8
-    (OUT/"list.rgb565").write_bytes(pixels)
-    subprocess.run(["ffmpeg","-v","error","-y","-f","rawvideo","-pixel_format","rgb565be",
-                    "-video_size","320x240","-i",str(OUT/"list.rgb565"),"-frames:v","1",
-                    str(OUT/"list.png")],check=True)
-    results["render"] = {"rows":4,"selection_highlight":True,"invalid_preview_placeholder":True,
-                         "bounds_guards":True,"artifact":str(OUT/"list.png")}
 (OUT/"summary.json").write_text(json.dumps(results,indent=2))
-print("PASS: actual C pagination (220 files/all positions), BMP/AVI thumbnails, malformed inputs, list render/guards")
+print("PASS: actual C pagination (220 files/all positions), BMP/AVI thumbnails, malformed inputs, decode bounds guards")

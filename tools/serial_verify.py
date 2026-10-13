@@ -27,9 +27,11 @@ pattern = re.compile(r"STATS fps=([\d.]+) display_ms=([\d.]+) total=(\d+) droppe
 with serial.Serial(args.port, 115200, timeout=0.1) as port, path.open("w", encoding="utf-8") as log:
     if args.reset:
         port.dtr = False
+        port.reset_input_buffer()
         HardReset(port, uses_usb=True)()
     started = time.monotonic()
     pending = b""
+    awaiting_boot = args.reset
     while time.monotonic() - started < args.seconds:
         data = port.read(max(1, port.in_waiting))
         if not data:
@@ -40,6 +42,12 @@ with serial.Serial(args.port, 115200, timeout=0.1) as port, path.open("w", encod
             line = raw.decode("utf-8", errors="replace").rstrip("\r")
             log.write(line + "\n")
             log.flush()
+            # 最新修改：USB可能残留复位前的TX数据，先等本次启动标记。
+            # 原始日志仍保留，但旧STATS不能混入复位后帧数及堆统计。
+            if awaiting_boot:
+                if "state=INITIALIZING" not in line:
+                    continue
+                awaiting_boot = False
             # 长时验证每 30 个样本输出一次，完整原始日志全部保存。
             match = pattern.search(line)
             if match:

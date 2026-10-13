@@ -4,7 +4,7 @@
  * @brief 本地实时预览调度、帧统计与有限次数摄像头恢复。
  * @date 2026-10-12
  * @copyright None
- * @note 修改日志：首版采用单任务有界流水，避免跨任务帧所有权竞态。
+ * @note 修改日志：菜单归还借用帧后停流，独立轮询输入/回放，返回取景复用缓冲启流。
  * @note 法律信息：None；RGB565 原生输出代替设计初稿的软件 YUV 转换。
  */
 #include "application.h"
@@ -24,6 +24,9 @@
 /* 时间用微秒，统计周期 1 秒；摄像头恢复总次数限定为 3。 */
 #define STATS_PERIOD_US       (1000000)
 #define MAX_RECOVERY_ATTEMPTS (3)
+#define MENU_POLL_MS          (10)
+/* 三缓冲恢复后完整丢弃一轮，避免将启流边界的过渡图像提交LCD。 */
+#define PREVIEW_RESUME_DROP_FRAMES (3)
 static const char *kTag = "preview";
 
 /**
@@ -74,6 +77,46 @@ static esp_err_t RecoverCamera(i2c_master_bus_handle_t bus, unsigned *attempts)
     }
 
     return result == ESP_OK ? ESP_FAIL : result;
+}
+
+/**
+ * @authors Codex
+ * @brief 启流后丢弃三帧，保持此前已显示的黑屏，不读取或显示像素。
+ * @details 每帧即使valid=false也须归还，避免预热耗尽采集队列。
+ * 三次取帧分别受一秒超时约束，不用固定sleep猜测DMA完成。
+ * 只在无其他借用帧时调用，返回失败由上层关闭设备并有限恢复。
+ * 此函数不处理按键、不访问TF；预热结束后主循环继续正常输入处理。
+ * 丢弃帧单独记录，不混入传输错误/无效帧统计。
+ * @return ESP_OK三帧已全部归还；其他为取帧或归还错误。
+ */
+static esp_err_t WarmupPreview(void)
+{
+    for (unsigned index = 0; index < PREVIEW_RESUME_DROP_FRAMES; ++index)
+    {
+        CameraFrame frame = {0};
+        esp_err_t result = CameraGet(&frame);
+
+        if (ESP_OK != result)
+        {
+            return result;
+        }
+
+        /* 先保留只读诊断值，归还后frame会清零；不读取过渡帧像素。
+         * 所有丢弃均必须实际QBUF成功，再记录预热进度。 */
+        unsigned buffer_index = frame.index;
+        bool valid = frame.valid;
+        result = CameraReturn(&frame);
+
+        if (ESP_OK != result)
+        {
+            return result;
+        }
+
+        ESP_LOGI(kTag, "PREVIEW_WARMUP discarded=%u buffer=%u valid=%d",
+                 index + 1, buffer_index, valid);
+    }
+
+    return ESP_OK;
 }
 
 /**
@@ -164,7 +207,7 @@ void ApplicationStart(void)
     int64_t startup = esp_timer_get_time();
     i2c_master_bus_handle_t bus = NULL;
     unsigned recovery_attempts = 0;
-    ESP_LOGI(kTag, "camera-storage v2.4-photo state=INITIALIZING");
+    ESP_LOGI(kTag, "camera-storage v2.8-resume-black state=INITIALIZING");
     ESP_LOGI(kTag, "PSRAM capacity=%u",
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     esp_err_t result = BoardInit(&bus);
@@ -260,10 +303,135 @@ void ApplicationStart(void)
     int64_t display_sum = 0;
     int64_t last_valid = window;
     bool first = true;
+    /* 非零表示恢复取景的黑屏已实际刷完，直到首个正常预览绘制成功。 */
+    int64_t resume_black_since = 0;
     ESP_LOGI(kTag, "state=PREVIEWING");
 
     while (true)
     {
+        if (!StorageNeedsCapture())
+        {
+            /* 初始格式提示或拍照后进入提示时，也必须先停止DMA。
+             * 此处处于两次取帧之间，不持有帧，不释放设备映射内存。
+             * 菜单输入、卡状态和媒体回放时钟均不再等待CameraGet。 */
+            result = CameraPause();
+
+            if (ESP_OK != result)
+            {
+                ESP_LOGE(kTag, "state=ERROR menu pause=%s",
+                         esp_err_to_name(result));
+                StorageStop();
+                break;
+            }
+
+            StorageProcess(NULL);
+
+            if (!StorageNeedsCapture())
+            {
+                result = StorageDraw(NULL);
+
+                if (ESP_OK != result)
+                {
+                    ESP_LOGE(kTag, "state=ERROR menu draw=%s",
+                             esp_err_to_name(result));
+                    StorageStop();
+                    break;
+                }
+
+                /* idle统计与采集FPS区分；captures在菜单期间必须不变。
+                 * 保留STATS格式使已有只读验收脚本可检查堆稳定性。
+                 * 文件回放会更新LCD，但不能把菜单轮询算作摄像头帧。 */
+                int64_t idle_now = esp_timer_get_time();
+
+                if ((idle_now - window) >= STATS_PERIOD_US)
+                {
+                    ESP_LOGI(kTag,
+                             "MENU_IDLE streaming=%d captures=%lu poll_ms=%d",
+                             CameraIsStreaming(),
+                             (unsigned long)CameraGetCount(), MENU_POLL_MS);
+                    ESP_LOGI(
+                        kTag,
+                        "STATS fps=0.00 display_ms=0.00 total=%" PRIu32
+                        " dropped=%" PRIu32
+                        " crc=00000000 internal_free=%u psram_free=%u",
+                        total, dropped,
+                        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                    window = idle_now;
+                }
+
+                /* 最多每10ms轮询一次，空闲时让出CPU，不靠相机DMA唤醒。
+                 * 卡扫描/回放及LCD传输依旧同步，其耗时不属于固定轮询等待。 */
+                vTaskDelay(pdMS_TO_TICKS(MENU_POLL_MS));
+                continue;
+            }
+        }
+
+        if (!CameraIsStreaming())
+        {
+            /* STREAMOFF已清空队列，恢复必须重新排入全部三个缓冲。
+             * 启流失败关闭设备并有限恢复，不无限重复失败的部分排队。
+             * 重设统计窗口和有效帧时钟，菜单停留不算采集超时。 */
+            /* 最新修改：先完成全黑LCD DMA，再启流和预热。
+             * 黑屏不依赖相机帧，也不保留可能仍被DMA覆盖的旧帧指针。
+             * 任一黑屏绘制错误都禁止启流后显示未知过渡图像。 */
+            result = LcdFill(0x0000);
+
+            if (ESP_OK != result)
+            {
+                ESP_LOGE(kTag, "state=ERROR resume black=%s",
+                         esp_err_to_name(result));
+                break;
+            }
+
+            resume_black_since = esp_timer_get_time();
+            ESP_LOGI(kTag, "PREVIEW_RESUME_BLACK shown warmup_frames=%d",
+                     PREVIEW_RESUME_DROP_FRAMES);
+            result = CameraResume();
+
+            if (ESP_OK != result)
+            {
+                ESP_LOGW(kTag, "camera resume failed=%s",
+                         esp_err_to_name(result));
+                result = RecoverCamera(bus, &recovery_attempts);
+            }
+
+            if (ESP_OK != result)
+            {
+                ESP_LOGE(kTag, "state=ERROR resume=%s",
+                         esp_err_to_name(result));
+                break;
+            }
+
+            result = WarmupPreview();
+
+            if (ESP_OK != result)
+            {
+                /* 预热取帧失败保持黑屏，重建后也重新丢弃过渡帧。
+                 * 使用既有累计恢复上限，失败不会无限阻塞在黑屏。 */
+                ESP_LOGW(kTag, "preview warmup failed=%s",
+                         esp_err_to_name(result));
+                result = RecoverCamera(bus, &recovery_attempts);
+
+                if (ESP_OK == result)
+                {
+                    result = WarmupPreview();
+                }
+            }
+
+            if (ESP_OK != result)
+            {
+                ESP_LOGE(kTag, "state=ERROR preview warmup=%s",
+                         esp_err_to_name(result));
+                break;
+            }
+
+            window = esp_timer_get_time();
+            last_valid = window;
+            shown = 0;
+            display_sum = 0;
+        }
+
         /* 等待完整相机帧，不读摄像头 DMA 正在写入的缓冲。
          * 取到帧后检查已完成新帧，优先降低画面积压延迟。
          * 同一循环最多临时持有两帧，替换后立即归还一帧。
@@ -334,6 +502,39 @@ void ApplicationStart(void)
          * 音频/按键独立任务不持有摄像头帧，不并发写卡或画屏。
          * 所有LCD调用都等待最后DMA，文件与显示共用SPI按序访问。 */
         StorageProcess(&frame);
+
+        if (!StorageNeedsCapture())
+        {
+            /* 菜单动作先封闭录像，再归还最后一帧；停流前不绘制菜单。
+             * LCD绘制不借用相机像素，暂停后可以独立进行媒体扫描/回放。
+             * 归还或停流失败保留资源，不在错误状态继续访问图像。 */
+            result = CameraReturn(&frame);
+
+            if (ESP_OK == result)
+            {
+                result = CameraPause();
+            }
+
+            if (ESP_OK == result)
+            {
+                result = StorageDraw(NULL);
+            }
+
+            if (ESP_OK != result)
+            {
+                ESP_LOGE(kTag, "state=ERROR enter menu=%s",
+                         esp_err_to_name(result));
+                StorageStop();
+                break;
+            }
+
+            resume_black_since = 0;
+            window = esp_timer_get_time();
+            shown = 0;
+            display_sum = 0;
+            continue;
+        }
+
         result = StorageDraw(&frame);
         /* 成功返回时最后一条 LCD DMA 已完成。
          * LCD 不长期持有原帧，原帧只在分条拷贝时读取。
@@ -351,6 +552,15 @@ void ApplicationStart(void)
             CameraStop();
             StorageStop();
             break;
+        }
+
+        if (resume_black_since > 0)
+        {
+            /* 只有正常取景已完成LCD DMA且帧已归还，才宣布黑屏结束。 */
+            ESP_LOGI(kTag,
+                     "PREVIEW_RESUME_SHOWN warmup_frames=%d black_us=%" PRId64,
+                     PREVIEW_RESUME_DROP_FRAMES, end - resume_black_since);
+            resume_black_since = 0;
         }
 
         /* 最新修改：相机没有借用帧时才允许改变分辨率和缓冲。 */

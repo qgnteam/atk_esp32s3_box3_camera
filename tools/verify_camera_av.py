@@ -107,8 +107,9 @@ def main():
 
         def status(screen, mode=None):
             command("u")
-            match = wait_for(r"UI_STATUS screen=(\d+) mode=(PHOTO|VIDEO)")
+            match = wait_for(r"UI_STATUS screen=(\d+) mode=(PHOTO|VIDEO).* streaming=(\d+) captures=(\d+)")
             assert int(match.group(1)) == screen, match.group(0)
+            assert int(match.group(3)) == (1 if screen == 0 else 0), match.group(0)
             if mode:
                 assert match.group(2) == mode
 
@@ -153,10 +154,14 @@ def main():
                     read_line(deadline)
                 except TimeoutError:
                     break
-            command("e")
+            # Entering the root menu must finalize recording before stopping DMA.
+            command("n")
             stopped = wait_for(r"RECORD_STOP frames=(\d+) period_us=(\d+) audio_bytes=(\d+) chunks=(\d+) audio_valid=(\d+)")
             assert stopped.group(5) == "1"
             results["video"] = wait_for(r"SAVED (\S+\.AVI)").group(1)
+            status(6, "VIDEO")
+            command("b")
+            status(0, "VIDEO")
             command("v")
             checked = wait_for(r"FILE_VERIFY .*bytes=(\d+) expected=(\d+) crc=([0-9a-f]+) valid=(\d+)",60)
             assert checked.group(1) == checked.group(2) and checked.group(4) == "1"
@@ -164,6 +169,8 @@ def main():
             results["avi"] = inspect_avi(avi)
             # First list item is the oldest photo; previous wraps to newest video.
             command("n")
+            status(6)
+            command("e")
             wait_for(r"BROWSE count=\d+ selected=\S+\.BMP")
             status(3)
             command("e")
@@ -179,6 +186,8 @@ def main():
             status(5)
             wait_for(r"PLAY_STOP complete",args.seconds+15)
             status(3)
+            command("b")
+            status(6,"VIDEO")
             command("b")
             status(0,"VIDEO")
             command("l")

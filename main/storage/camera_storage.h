@@ -21,7 +21,7 @@ void StorageInit(i2c_master_bus_handle_t bus);
 /**
  * @authors Codex
  * @brief 轮询按键并同步保存图片或一帧录像。
- * @param frame 非空有效借用帧，只在返回前读取，不持有、不归还。
+ * @param frame 采集中为有效借用帧；暂停采集时为NULL，仍处理输入/回放。
  * @return None；必须与初始化、停止在同一应用任务调用。
  */
 void StorageProcess(const CameraFrame *frame);
@@ -40,7 +40,7 @@ bool StorageIsRecording(void);
 /**
  * @authors Codex
  * @brief 根据当前模式显示预览、文件浏览或格式化确认页。
- * @param frame 非空有效借用帧，不转移所有权。
+ * @param frame 取景时非空有效帧；菜单/回放/诊断可为NULL。
  * @return ESP_OK或LCD错误，等待所有DMA完成。
  */
 esp_err_t StorageDraw(const CameraFrame *frame);
@@ -51,4 +51,11 @@ esp_err_t StorageDraw(const CameraFrame *frame);
  * @return 预览恢复结果，失败须停止相机。
  */
 esp_err_t StorageCapturePending(i2c_master_bus_handle_t bus);
+/**
+ * @authors Codex
+ * @brief 判断当前页面是否需要实时采集，菜单/回放/诊断不需要。
+ * @return true取景且未进入纯色诊断，false允许独立处理输入和显示。
+ * @note 主任务读取，不自行暂停或恢复摄像头，不访问磁盘。
+ */
+bool StorageNeedsCapture(void);
 #endif

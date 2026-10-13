@@ -1,23 +1,38 @@
 # 当前版本测试报告
 
-日期：2026-10-13；版本：`camera-storage v2.4-photo`（高亮最低 0.5 秒调整）。
+日期：2026-10-13（Asia/Shanghai）；版本：`camera-storage v2.8-resume-black`。仅记录当前版本。
 
-## 本版构建与烧录
+## 编译及烧录
 
-ESP-IDF v6.1、esp32s3：`idf.py build` 成功，`idf.py -p /dev/ttyACM0 flash` 成功，写入哈希验证通过。GC0308 的 RGB565_BE QVGA/VGA 配置均启用。本轮未重新运行与高亮计时无关的主机及完整音视频测试。
+ESP-IDF v6.1 / ESP32-S3构建及USB `/dev/ttyACM0` 烧录通过，Flash校验通过；日志outputs/resume-black-build.log、resume-black-flash.log。当前固件SHA-256：`623c054b641ade2089f4563ec44bccf5cf01d22fb5e484407176f8d960d8975b`。
 
-## 本版实板测试
+## 主机检查
 
-`python tools/verify_photo_capture.py --port /dev/ttyACM0 --output outputs/photo-feedback-500ms`：通过。使用串口模拟 K2，沿用实体键的 UI 状态机，实际 FAT32 卡未格式化或删除既有文件。
+| 测试 | 结果 |
+|---|---|
+| test_preview_warmup.py | 通过；生产WarmupPreview定义配帧模型，恰好丢弃/归还三帧，无效帧也归还，取帧/归还失败不继续；像素使用不可读指针确保没有读取 |
+| test_camera_stream.py | 通过；暂停借用帧保护、2000次队列循环及停流/排队/启流错误模型 |
+| test_camera_ui.py | 通过；78125格式确认序列、三项一级菜单、TF层级及返回 |
+| test_key_filter.py | 通过；三键映射、去抖、两秒边界及长按取消/释放抑制 |
+| Python语法及git diff --check | 通过 |
 
-- `/sdcard/DCIM/IMG00007.BMP`：640×480 BMP，921654 字节，完整读回 CRC `c2790481`；高亮处理耗时 3.723 秒，成功提示保持 3.026 秒。
-- `/sdcard/DCIM/IMG00008.BMP`：640×480 BMP，921654 字节，完整读回 CRC `24e47fd3`；高亮处理耗时 3.765 秒，成功提示保持 3.026 秒。
-- `/sdcard/DCIM/IMG00009.BMP`：640×480 BMP，921654 字节，完整读回 CRC `37a7062e`；高亮处理耗时 3.725 秒，成功提示保持 3.026 秒。
+主机模型检查不代表读取了真实LCD或模拟了DMA，硬件正常路径由下述实板日志验证。其余媒体格式/完整AV回归未在本版重新执行，不沿用旧版结果作为本版验收。
 
-三次均按顺序完成高亮帧绘制、VGA 采集、TF 保存、结束反馈及 QVGA 恢复。高亮处理耗时包含相机切换和 TF 写入，当前卡超过 0.5 秒，未追加最低时长等待；普通画面在摄像头恢复后刷新。PHOTO SAVED 仍从首次成功绘制起保持 3 秒。
+## 实板黑屏过渡及菜单验证
 
-证据：`outputs/photo-feedback-500ms/serial.log` 和 `summary.json`。串口运行无崩溃或应用相机恢复。组件重复初始化时仍输出 GPIO ISR 服务已安装日志，采集及保存正常。
+`verify_lvgl_menu.py --cycles 10` passed=true。摘要及串口证据位于outputs/resume-black-board/summary.json和serial.log。
 
-## 验证边界
+- 每次退出顺序均为：PREVIEW_RESUME_BLACK shown → CAMERA_RESUMED → 三次PREVIEW_WARMUP discarded=1/2/3 → PREVIEW_RESUME_SHOWN。
+- 三帧已实际归还，未进入StorageDraw；采集元数据即使valid=1也按过渡帧丢弃。
+- 黑屏DMA完成到正常预览绘制完成的时长：最短217.01ms、最长225.40ms、平均220.62ms。
+- 连续10次菜单切换内存稳定，内部堆179807字节、PSRAM7487588字节，每次相同。
+- 菜单streaming=0、空闲时累计取帧不变，返回取景streaming=1；功能/TF/容量/确认页及真实帧CRC导出通过。
+- 无采集错误、异常恢复、重启或看门狗日志。本次未新增、删除或格式化TF文件。
 
-当前硬件捕获及写入耗时超过 0.5 秒，因此本轮未实测快速保存时补足最低时长的分支。该分支按实际高亮绘制时间计算剩余微秒，仅在剩余时间大于零时等待。新计时版本的屏幕观感及物理按键操作未单独人工确认。当前实卡为 FAT32，不计为 exFAT 实卡验收；未进行卡满、掉电和长期运行验收。
+自动检查证明过渡帧没有送入显示路径。用户现场通过BACK TO PREVIEW退出一级菜单后确认：短暂黑屏后正常取景，没有花屏。本次退出菜单花屏修复已通过现场观察验证。
+
+## 未执行及限制
+
+未实板注入黑屏DMA失败/预热失败，未验证扬声器观感、长时间音视频回归、Windows流程或真实格式化。三帧预热不对任意传感器内容异常作自动图像质量判定。原面板固定横线的诊断记录另见lcd-line-diagnosis.md。
+
+生成文件在Git忽略目录，docs未修改，用户暂存区及原有修改保留。

@@ -2,4 +2,10 @@ menu "BOX3 camera storage"
     config BOX3_SD_ENABLED
         bool "Enable TF card on LCD SPI2 bus (CS GPIO18)"
         default y
+    config BOX3_LCD_SPI_HZ
+        int "LCD SPI clock frequency (Hz)"
+        range 1000000 80000000
+        default 60000000
+        help
+            Lower this to 20000000 for LCD signal-integrity diagnostics.
 endmenu

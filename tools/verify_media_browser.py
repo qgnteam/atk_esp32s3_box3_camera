@@ -104,6 +104,8 @@ def main():
             result["memory_before"]=stats()
             status(0)
             command("n")
+            status(6)
+            command("e")
             initial=page()
             wait(r"BROWSE count=\d+ selected=\S+\.BMP")
             assert initial["first"] == 1 and initial["selected_row"] == 0
@@ -142,15 +144,21 @@ def main():
             status(3)
             screenshot("after-playback")
             command("b")
+            status(6)
+            command("b")
             status(0)
             result["memory_after"]=stats()
             # After a warmup, re-enter and leave the list three times: no growing allocations.
             idle=[]
             for _ in range(3):
                 command("n")
+                status(6)
+                command("e")
                 page()
                 wait(r"BROWSE count=")
                 status(3)
+                command("b")
+                status(6)
                 command("b")
                 status(0)
                 idle.append(stats())
@@ -158,6 +166,8 @@ def main():
             assert len(set(idle)) == 1, "menu allocations did not return to a stable baseline"
             # Final leave the board displaying the new first-page list.
             command("n")
+            status(6)
+            command("e")
             page()
             wait(r"BROWSE count=")
             command("e")

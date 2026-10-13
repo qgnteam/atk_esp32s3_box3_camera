@@ -4,7 +4,7 @@
  * @brief esp_video V4L2 GC0308 原生 RGB565 大端采集。
  * @date 2026-10-12
  * @copyright None
- * @note 修改日志：格式/容量校验与有限超时；法律信息：None。
+ * @note 修改日志：新增保留缓冲的暂停/恢复及借用帧保护；法律信息：None。
  * @note API 使用依据官方 capture_stream 示例，未复制其实现。
  */
 #include "camera_capture.h"
@@ -26,6 +26,8 @@ static const char *kTag = "camera";
 static int s_fd = -1;
 static bool s_initialized = false;
 static bool s_streaming = false;
+/* 成功DQBUF总数用于实板证明菜单停流，不因菜单切换或模式重建清零。 */
+static uint32_t s_capture_count = 0;
 /* MMAP 只借用组件内存；关闭设备时组件释放，不调用 free。 */
 static uint8_t *s_buffers[CAMERA_BUFFER_COUNT] = {NULL};
 static size_t s_capacities[CAMERA_BUFFER_COUNT] = {0};
@@ -228,6 +230,8 @@ esp_err_t CameraGet(CameraFrame *frame)
      * 只有 valid=true 的像素可以提交到显示转换链路。 */
     ESP_RETURN_ON_FALSE(NULL != frame, ESP_ERR_INVALID_ARG, kTag, "null frame");
     memset(frame, 0, sizeof(*frame));
+    ESP_RETURN_ON_FALSE(s_streaming, ESP_ERR_INVALID_STATE, kTag,
+                        "capture paused");
     struct v4l2_buffer buffer = {
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
         .memory = V4L2_MEMORY_MMAP,
@@ -243,6 +247,7 @@ esp_err_t CameraGet(CameraFrame *frame)
                             && (!s_borrowed[buffer.index]),
                         ESP_ERR_INVALID_STATE, kTag, "invalid frame ownership");
     s_borrowed[buffer.index] = true;
+    ++s_capture_count;
     frame->data = s_buffers[buffer.index];
     frame->index = buffer.index;
     frame->length = buffer.bytesused;
@@ -334,4 +339,103 @@ esp_err_t CameraStop(void)
 esp_err_t CameraInit(i2c_master_bus_handle_t bus)
 {
     return CameraInitMode(bus, false);
+}
+
+/**
+ * @authors Codex
+ * @brief 只在主任务且所有借用帧归还后停流，保留MMAP和I2C对象。
+ * @details STREAMOFF由驱动停止传感器/控制器并清空queued/done队列。
+ * 保留图像分配减少菜单频繁进出的延迟，不意味着DMA仍写PSRAM。
+ * 无外部引用时才允许清空队列，否则归还令牌将失效。
+ * 成功后更新软件状态，失败保持原状态以防误释放硬件资源。
+ * 已暂停的重复调用不重复STREAMOFF，不执行无意义的驱动操作。
+ * @return ESP_OK或所有权/驱动错误；不关闭设备，不释放缓冲。
+ */
+esp_err_t CameraPause(void)
+{
+    ESP_RETURN_ON_FALSE(s_fd >= 0, ESP_ERR_INVALID_STATE, kTag,
+                        "camera not open");
+
+    for (unsigned index = 0; index < CAMERA_BUFFER_COUNT; ++index)
+    {
+        ESP_RETURN_ON_FALSE(!s_borrowed[index], ESP_ERR_INVALID_STATE, kTag,
+                            "pause requires all frames returned");
+    }
+
+    if (!s_streaming)
+    {
+        return ESP_OK;
+    }
+
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    ESP_RETURN_ON_FALSE(0 == ioctl(s_fd, VIDIOC_STREAMOFF, &type), ESP_FAIL,
+                        kTag, "pause stream off errno=%d", errno);
+    s_streaming = false;
+    ESP_LOGI(kTag,
+             "CAMERA_PAUSED streaming=0 captures=%lu buffers=3 retained=1",
+             (unsigned long)s_capture_count);
+    return ESP_OK;
+}
+
+/**
+ * @authors Codex
+ * @brief 重新排入全部缓冲后启流，不重复初始化传感器或分配PSRAM。
+ * @details esp_video停流会把全部缓冲重置为未排队，不能直接STREAMON。
+ * 每个映射缓冲仍由设备拥有，重新排队使用原索引和MMAP类型。
+ * 队列或启流失败时保持非采集状态，上层须关闭并有限重建。
+ * 不允许在部分失败后重复排队，应先CameraStop撤销残留队列。
+ * 已采集的重复调用保持原状态，不制造重复队列项。
+ * 默认恢复一秒取帧上限；首次取帧仍经过主循环长度和最新帧检查。
+ * @return ESP_OK采集已启动，其他为配置/队列/驱动错误。
+ */
+esp_err_t CameraResume(void)
+{
+    ESP_RETURN_ON_FALSE(s_fd >= 0, ESP_ERR_INVALID_STATE, kTag,
+                        "camera not open");
+
+    if (s_streaming)
+    {
+        return ESP_OK;
+    }
+
+    for (unsigned index = 0; index < CAMERA_BUFFER_COUNT; ++index)
+    {
+        ESP_RETURN_ON_FALSE(!s_borrowed[index] && (NULL != s_buffers[index]),
+                            ESP_ERR_INVALID_STATE, kTag,
+                            "invalid resume buffer");
+        struct v4l2_buffer buffer = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                                     .memory = V4L2_MEMORY_MMAP,
+                                     .index = index};
+        ESP_RETURN_ON_FALSE(0 == ioctl(s_fd, VIDIOC_QBUF, &buffer), ESP_FAIL,
+                            kTag, "resume queue errno=%d", errno);
+    }
+
+    ESP_RETURN_ON_ERROR(CameraSetTimeout(1000), kTag, "resume timeout");
+    int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    ESP_RETURN_ON_FALSE(0 == ioctl(s_fd, VIDIOC_STREAMON, &type), ESP_FAIL,
+                        kTag, "resume stream on errno=%d", errno);
+    s_streaming = true;
+    ESP_LOGI(kTag, "CAMERA_RESUMED streaming=1 captures=%lu buffers=3 reused=1",
+             (unsigned long)s_capture_count);
+    return ESP_OK;
+}
+
+/**
+ * @authors Codex
+ * @brief 返回主任务维护的启流状态，不在另一个任务窥探驱动队列。
+ * @return true采集中，false未初始化或已停流。
+ */
+bool CameraIsStreaming(void)
+{
+    return s_streaming;
+}
+
+/**
+ * @authors Codex
+ * @brief 返回累计成功DQBUF数，菜单停流验证不依赖画面是否变化。
+ * @return 无符号32位次数，可能自然回绕，不用作内存索引。
+ */
+uint32_t CameraGetCount(void)
+{
+    return s_capture_count;
 }

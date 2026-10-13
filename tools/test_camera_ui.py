@@ -17,7 +17,8 @@ lib = ctypes.CDLL(str(out / "camera_ui.so"))
 
 class Ui(ctypes.Structure):
     _fields_ = [("screen", ctypes.c_int), ("video", ctypes.c_bool),
-                ("yes", ctypes.c_bool), ("dirty", ctypes.c_bool)]
+                ("yes", ctypes.c_bool), ("format_return", ctypes.c_int),
+                ("menu_selected", ctypes.c_uint), ("dirty", ctypes.c_bool)]
 
 
 lib.CameraUiInit.argtypes = [ctypes.POINTER(Ui), ctypes.c_bool]
@@ -29,12 +30,14 @@ assert ui.screen == 0 and not ui.video
 assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 1  # K2 photo
 assert lib.CameraUiHandle(ctypes.byref(ui), 2) == 3 and ui.video  # K1 mode/up
 assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 2  # K2 recorder
-assert lib.CameraUiHandle(ctypes.byref(ui), 3) == 4 and ui.screen == 3  # K0 menu
+assert lib.CameraUiHandle(ctypes.byref(ui), 3) == 10 and ui.screen == 6  # K0 functions
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 4 and ui.screen == 3  # media
 assert lib.CameraUiHandle(ctypes.byref(ui), 2) == 5
 assert lib.CameraUiHandle(ctypes.byref(ui), 3) == 6
 assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 7
 ui.screen = 5
 assert lib.CameraUiHandle(ctypes.byref(ui), 4) == 8 and ui.screen == 3
+assert lib.CameraUiHandle(ctypes.byref(ui), 4) == 8 and ui.screen == 6
 assert lib.CameraUiHandle(ctypes.byref(ui), 4) == 8 and ui.screen == 0
 
 # Enumerate 78,125 sequences. A format action can only follow the second YES
@@ -60,3 +63,36 @@ for key in (0, 1, 2, 4):
     for _ in range(20):
         assert lib.CameraUiHandle(ctypes.byref(ui), key) != 9
 print("PASS: actual C UI; photo/video/browser; 78125 format confirmation sequences")
+
+# Normal supported cards must also reach two physical confirmation pages via TF menu.
+lib.CameraUiInit(ctypes.byref(ui), False)
+for key in (3, 3, 1):
+    lib.CameraUiHandle(ctypes.byref(ui), key)
+assert ui.screen == 7 and ui.menu_selected == 0
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 11 and ui.screen == 8
+assert lib.CameraUiHandle(ctypes.byref(ui), 4) == 8 and ui.screen == 7
+assert lib.CameraUiHandle(ctypes.byref(ui), 3) == 0
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 12 and ui.screen == 1 and not ui.yes
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 0 and ui.screen == 7
+# Re-enter and prove two YES selections remain necessary.
+for key in (3, 1, 3, 1):
+    assert lib.CameraUiHandle(ctypes.byref(ui), key) != 9
+assert ui.screen == 2 and not ui.yes
+assert lib.CameraUiHandle(ctypes.byref(ui), 3) == 0
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 9 and ui.screen == 7
+assert lib.CameraUiHandle(ctypes.byref(ui), 4) == 8 and ui.screen == 6
+assert ui.menu_selected == 1
+# Unknown states recover safely; selection wraps in both directions.
+ui.screen = 99
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 8 and ui.screen == 0
+lib.CameraUiHandle(ctypes.byref(ui), 3)
+lib.CameraUiHandle(ctypes.byref(ui), 2)
+assert ui.menu_selected == 2
+lib.CameraUiHandle(ctypes.byref(ui), 3)
+assert ui.menu_selected == 0
+# Explicit root-menu return must close into preview while preserving mode.
+ui.video = True
+lib.CameraUiHandle(ctypes.byref(ui), 2)
+assert lib.CameraUiHandle(ctypes.byref(ui), 1) == 8
+assert ui.screen == 0 and ui.video
+print("PASS: function/TF hierarchy, usage return, supported-card format, cancel, wrap")

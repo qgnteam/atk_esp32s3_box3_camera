@@ -4,9 +4,47 @@
  * @brief K2确认取消、K1上、K0下的模式与格式化确认逻辑。
  * @date 2026-10-13
  * @copyright None
- * @note 修改日志：危险操作默认取消；法律信息：None。
+ * @note 修改日志：一级功能菜单增加显式返回取景选项；法律信息：None。
  */
 #include "camera_ui.h"
+#include <stddef.h>
+
+/* 最新修改：一级菜单末项显式返回取景，复用关闭动作及资源回收。 */
+static const CameraMenuItem kMainMenu[] = {
+    {"MEDIA VIEW", UI_BROWSER, UI_ACTION_LIST},
+    {"TF CARD", UI_TF_MENU, UI_ACTION_MENU},
+    {"BACK TO PREVIEW", UI_PREVIEW, UI_ACTION_CLOSE}};
+
+/* 格式化只请求进入确认流程，菜单表不能直接产生擦除动作。 */
+static const CameraMenuItem kTfMenu[] = {
+    {"CARD USAGE", UI_CARD_STATUS, UI_ACTION_STATUS},
+    {"FORMAT TF CARD", UI_FORMAT_PROMPT, UI_ACTION_FORMAT_REQUEST}};
+
+/**
+ * @authors Codex
+ * @brief 借用菜单表；未知页不提供可执行菜单项。
+ * @param screen 页面编号。
+ * @param count 非空数量输出。
+ * @return 静态菜单表或NULL，不需释放。
+ */
+const CameraMenuItem *CameraUiMenuItems(CameraUiScreen screen, unsigned *count)
+{
+    *count = 0;
+
+    if (UI_MENU == screen)
+    {
+        *count = sizeof(kMainMenu) / sizeof(kMainMenu[0]);
+        return kMainMenu;
+    }
+
+    if (UI_TF_MENU == screen)
+    {
+        *count = sizeof(kTfMenu) / sizeof(kTfMenu[0]);
+        return kTfMenu;
+    }
+
+    return NULL;
+}
 
 /**
  * @authors Codex
@@ -20,6 +58,8 @@ void CameraUiInit(CameraUi *ui, bool unsupported)
     *ui = (CameraUi){.screen = unsupported ? UI_FORMAT_PROMPT : UI_PREVIEW,
                      .video_mode = false,
                      .format_yes = false,
+                     .format_return = UI_PREVIEW,
+                     .menu_selected = 0,
                      .dirty = true};
 }
 
@@ -49,7 +89,7 @@ static CameraUiAction FormatKey(CameraUi *ui, CameraKey key)
     }
     else if (KEY_CANCEL == key)
     {
-        ui->screen = UI_PREVIEW;
+        ui->screen = ui->format_return;
         ui->format_yes = false;
         ui->dirty = true;
     }
@@ -57,7 +97,7 @@ static CameraUiAction FormatKey(CameraUi *ui, CameraKey key)
     {
         if (!ui->format_yes)
         {
-            ui->screen = UI_PREVIEW;
+            ui->screen = ui->format_return;
         }
         else if (UI_FORMAT_PROMPT == ui->screen)
         {
@@ -67,7 +107,7 @@ static CameraUiAction FormatKey(CameraUi *ui, CameraKey key)
         }
         else
         {
-            ui->screen = UI_PREVIEW;
+            ui->screen = ui->format_return;
             ui->format_yes = false;
             ui->dirty = true;
             return UI_ACTION_FORMAT;
@@ -85,7 +125,7 @@ static CameraUiAction FormatKey(CameraUi *ui, CameraKey key)
  * @brief 按所在页面解释三键，存储模块负责实际副作用。
  * @details
  * 相同按键的含义由页面确定，不能在菜单中直接拍照。
- * 取景页K2拍照/录像确认，K1模式切换、K0进入浏览。
+ * 取景页K2拍照/录像确认，K1模式切换、K0进入功能选择。
  * 菜单页K1向上/K0向下对应前后文件，K2打开媒体。
  * 打开媒体期间确认和返回都关闭并回到列表。
  * 从视频切换文件必须让上层先关闭音轨和释放缓冲。
@@ -125,9 +165,55 @@ CameraUiAction CameraUiHandle(CameraUi *ui, CameraKey key)
 
         if (KEY_DOWN == key)
         {
-            ui->screen = UI_BROWSER;
+            ui->screen = UI_MENU;
+            ui->menu_selected = 0;
             ui->dirty = true;
-            return UI_ACTION_LIST;
+            return UI_ACTION_MENU;
+        }
+
+        return UI_ACTION_NONE;
+
+    case UI_MENU:
+    case UI_TF_MENU:
+    {
+        /* 每页默认第一项；取消逐级返回，不直接执行任何存储动作。 */
+        unsigned count = 0;
+        const CameraMenuItem *items = CameraUiMenuItems(ui->screen, &count);
+        ui->dirty = true;
+
+        if (KEY_CANCEL == key)
+        {
+            ui->screen = (UI_TF_MENU == ui->screen) ? UI_MENU : UI_PREVIEW;
+            ui->menu_selected = (UI_MENU == ui->screen) ? 1 : 0;
+            return UI_ACTION_CLOSE;
+        }
+
+        if ((KEY_UP == key) || (KEY_DOWN == key))
+        {
+            ui->menu_selected = (KEY_DOWN == key)
+                                    ? ((ui->menu_selected + 1) % count)
+                                    : ((ui->menu_selected + count - 1) % count);
+        }
+        else if ((KEY_CONFIRM == key) && (ui->menu_selected < count))
+        {
+            const CameraMenuItem *item = &items[ui->menu_selected];
+            ui->screen = item->target;
+            ui->menu_selected = 0;
+            ui->format_yes = false;
+            ui->format_return = UI_TF_MENU;
+            return item->action;
+        }
+
+        return UI_ACTION_NONE;
+    }
+
+    case UI_CARD_STATUS:
+        if ((KEY_CONFIRM == key) || (KEY_CANCEL == key))
+        {
+            ui->screen = UI_TF_MENU;
+            ui->menu_selected = 0;
+            ui->dirty = true;
+            return UI_ACTION_CLOSE;
         }
 
         return UI_ACTION_NONE;
@@ -137,7 +223,8 @@ CameraUiAction CameraUiHandle(CameraUi *ui, CameraKey key)
 
         if (KEY_CANCEL == key)
         {
-            ui->screen = UI_PREVIEW;
+            ui->screen = UI_MENU;
+            ui->menu_selected = 0;
             return UI_ACTION_CLOSE;
         }
 

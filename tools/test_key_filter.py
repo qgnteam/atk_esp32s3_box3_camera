@@ -119,11 +119,12 @@ for duration_ms in (50,100,799,800,1500,1990,1999,2000,2010,3000,6000):
 # reopening media or confirming a format option on release.
 class Ui(ctypes.Structure):
     _fields_ = [("screen",ctypes.c_int),("video",ctypes.c_bool),
-                ("yes",ctypes.c_bool),("dirty",ctypes.c_bool)]
+                ("yes",ctypes.c_bool),("format_return",ctypes.c_int),
+                ("menu_selected",ctypes.c_uint),("dirty",ctypes.c_bool)]
 lib.CameraUiInit.argtypes = [ctypes.POINTER(Ui),ctypes.c_bool]
 lib.CameraUiHandle.argtypes = [ctypes.POINTER(Ui),ctypes.c_int]
 lib.CameraUiHandle.restype = ctypes.c_int
-for screen in range(6):
+for screen in range(9):
     ui=Ui()
     lib.CameraUiInit(ctypes.byref(ui),False)
     ui.screen=screen
@@ -135,7 +136,7 @@ for screen in range(6):
     assert event==4
     action=lib.CameraUiHandle(ctypes.byref(ui),event)
     assert action in (0,8) and action not in (1,7,9)
-    expected_screen=3 if screen in (4,5) else 0
+    expected_screen={3:6,4:3,5:3,7:6,8:7}.get(screen,0)
     assert ui.screen==expected_screen
     for level,timestamp in ((0,3000000),(0,4000000),(1,5000000),(1,5040000)):
         event=sample(s,level,timestamp)
@@ -155,7 +156,8 @@ lib.CameraUiInit(ctypes.byref(ui),False)
 assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==1  # K2 photograph
 assert lib.CameraUiHandle(ctypes.byref(ui),tap(1))==3 and ui.video  # K1 mode
 assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==2  # K2 record toggle
-assert lib.CameraUiHandle(ctypes.byref(ui),tap(0))==4 and ui.screen==3  # K0 menu
+assert lib.CameraUiHandle(ctypes.byref(ui),tap(0))==10 and ui.screen==6  # K0 functions
+assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==4 and ui.screen==3  # media
 assert lib.CameraUiHandle(ctypes.byref(ui),tap(1))==5  # K1 up
 assert lib.CameraUiHandle(ctypes.byref(ui),tap(0))==6  # K0 down
 assert lib.CameraUiHandle(ctypes.byref(ui),tap(2,0))==7  # K2 open

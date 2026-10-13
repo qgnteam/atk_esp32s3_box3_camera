@@ -13,6 +13,8 @@
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_crc.h"
+#include "sdkconfig.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
@@ -25,7 +27,7 @@
 #define STRIP_ROWS     (40)
 #define STRIP_BYTES    (PREVIEW_WIDTH * STRIP_ROWS * 2)
 #define LCD_TIMEOUT_MS (1000)
-#define LCD_SPI_HZ     (60000000)
+#define LCD_SPI_HZ     (CONFIG_BOX3_LCD_SPI_HZ)
 
 static bool s_flash = false; /* 快门反馈只作用于 LCD，禁止修改保存像素。 */
 static char s_caption[40] = {0};
@@ -36,6 +38,11 @@ static SemaphoreHandle_t s_done = NULL;
 static uint8_t *s_strips[2] = {NULL, NULL};
 static bool s_pending = false;
 static unsigned s_next_strip = 0;
+/* 诊断只核对将交给DMA的实际条缓冲，不把正确源像素当成面板读回。
+ * 这些变量仍由主任务独占，中断只释放完成信号。 */
+static bool s_diagnostic = false;
+static uint16_t s_diagnostic_color = 0;
+static unsigned s_diagnostic_rows = 0;
 
 /**
  * @authors Codex
@@ -111,6 +118,27 @@ static esp_err_t SubmitStrip(int y, const uint8_t *pixels)
      * 右下坐标是排除边界，必须用 y 加条高而非减一。
      * 提交成功才切换缓冲索引，失败不会伪造完成责任。 */
     ESP_RETURN_ON_ERROR(WaitTransfer(), kTag, "wait previous strip");
+
+    if (s_diagnostic)
+    {
+        /* 按实际发送内存核对全部像素，错误时禁止继续提交。
+         * CRC由主机独立按重复的RGB565大端字节计算并逐条比较。
+         * 区域日志还能检查0至239行是否连续覆盖，没有遗漏首行。 */
+        for (unsigned offset = 0; offset < STRIP_BYTES; offset += 2)
+        {
+            uint16_t actual =
+                ((uint16_t)pixels[offset] << 8) | pixels[offset + 1];
+            ESP_RETURN_ON_FALSE(actual == s_diagnostic_color,
+                                ESP_ERR_INVALID_STATE, kTag,
+                                "diagnostic pixel mismatch");
+        }
+
+        ESP_LOGI(kTag,
+                 "LCD_TEST_STRIP y=%d rows=%d color=%04x crc=%08lx uniform=1",
+                 y, STRIP_ROWS, s_diagnostic_color,
+                 (unsigned long)esp_rom_crc32_le(0, pixels, STRIP_BYTES));
+        s_diagnostic_rows += STRIP_ROWS;
+    }
     ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(s_panel, 0, y, PREVIEW_WIDTH,
                                                   y + STRIP_ROWS, pixels),
                         kTag, "draw strip");
@@ -398,4 +426,39 @@ esp_err_t LcdShowText(const char *lines)
 void LcdSetFlash(bool enabled)
 {
     s_flash = enabled;
+}
+
+/**
+ * @authors Codex
+ * @brief 直接纯色写屏并核对实际DMA源，不经过LVGL或相机像素。
+ * @details 两个mirror位相反切换，保持swap_xy不变，形成180度旋转。
+ * 不改SPI总线所有权、TF片选或电池供电；正常退出时恢复面板方向。
+ * 所有传输完成才打印结束标记；此标记不代表面板像素已读回。
+ * 软件数据错误返回失败，不把错误测试结果当作硬件故障依据。
+ * @param rgb565 要显示的颜色，RGB565主机序。
+ * @param reversed 是否反转180度。
+ * @return ESP_OK完整覆盖240行并等待DMA；其他为驱动或数据错误。
+ * @note 单任务、LCD初始化后调用；纯色保持由存储层禁止普通重绘实现。
+ */
+esp_err_t LcdDiagnosticFill(uint16_t rgb565, bool reversed)
+{
+    ESP_RETURN_ON_ERROR(WaitTransfer(), kTag, "diagnostic previous DMA");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, !reversed, reversed),
+                        kTag, "diagnostic rotation");
+    s_diagnostic = true;
+    s_diagnostic_color = rgb565;
+    s_diagnostic_rows = 0;
+    esp_err_t result = LcdFill(rgb565);
+    s_diagnostic = false;
+
+    if ((ESP_OK == result) && (PREVIEW_HEIGHT != s_diagnostic_rows))
+    {
+        result = ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(kTag,
+             "LCD_TEST_END color=%04x reversed=%d rows=%u spi_hz=%d result=%s",
+             rgb565, reversed, s_diagnostic_rows, LCD_SPI_HZ,
+             esp_err_to_name(result));
+    return result;
 }

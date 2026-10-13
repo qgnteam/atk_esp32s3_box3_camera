@@ -68,4 +68,13 @@ esp_err_t LcdDrawImage(const uint8_t *pixels);
  * @return None。
  */
 void LcdSetFlash(bool enabled);
+/**
+ * @authors Codex
+ * @brief 保持纯色诊断图，可反转坐标并核对每条发送缓冲。
+ * @param rgb565 主机序RGB565颜色；不叠加标题或快门反馈。
+ * @param reversed true旋转180度，false恢复正常面板方向。
+ * @return ESP_OK表示缓冲一致且DMA完成；错误由调用者停止绘制。
+ * @note 仅主任务在无录像/文件操作时调用，不读取LCD像素或检测面板缺陷。
+ */
+esp_err_t LcdDiagnosticFill(uint16_t rgb565, bool reversed);
 #endif
