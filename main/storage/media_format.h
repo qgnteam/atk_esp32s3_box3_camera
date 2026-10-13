@@ -41,6 +41,16 @@ void MediaAviHeader(uint8_t *header, uint32_t frames, uint32_t period_us);
  * @param output 至少 960 字节的输出，不允许重叠。
  * @return None
  */
+/**
+ * @authors Codex
+ * @brief 按指定宽度转换一行 RGB565；输出不允许与输入重叠。
+ * @param source 非空 width*2 字节输入。
+ * @param output 非空 width*3 字节输出。
+ * @param width 行宽，像素，调用者保证缓冲容量。
+ * @return None。
+ */
+void MediaConvertRowWidth(const uint8_t *source, uint8_t *output,
+                          unsigned width);
 void MediaConvertRow(const uint8_t *source, uint8_t *output);
 /**
  * @authors Codex

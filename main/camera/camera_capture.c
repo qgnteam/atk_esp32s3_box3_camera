@@ -31,6 +31,9 @@ static uint8_t *s_buffers[CAMERA_BUFFER_COUNT] = {NULL};
 static size_t s_capacities[CAMERA_BUFFER_COUNT] = {0};
 static bool s_borrowed[CAMERA_BUFFER_COUNT] = {false};
 static size_t s_stride = 0;
+/* 当前采集尺寸用于容量校验，拍照模式为传感器原生 VGA。 */
+static unsigned s_width = PREVIEW_WIDTH;
+static unsigned s_height = PREVIEW_HEIGHT;
 
 /**
  * @authors Codex
@@ -60,7 +63,7 @@ esp_err_t CameraSetTimeout(unsigned milliseconds)
  * @param bus 非空共享总线，生命周期长于摄像头。
  * @return ESP_OK 或首个错误；应用必须对失败调用 CameraStop。
  */
-esp_err_t CameraInit(i2c_master_bus_handle_t bus)
+esp_err_t CameraInitMode(i2c_master_bus_handle_t bus, bool photo)
 {
     /* 这里只借用总线，不创建另一个占用 GPIO2/3 的 I2C 控制器。
      * 传感器控制和扩展器复位均由同一任务串行执行。
@@ -96,6 +99,36 @@ esp_err_t CameraInit(i2c_master_bus_handle_t bus)
     s_fd = open(ESP_VIDEO_DVP_DEVICE_NAME, O_RDONLY);
     ESP_RETURN_ON_FALSE(s_fd >= 0, ESP_FAIL, kTag, "open DVP errno=%d", errno);
 
+    /* 最新修改：分配缓冲之前选择原生格式；禁止带借用帧重建。
+     * GC0308 最大彩色格式为 VGA，预览仍使用 QVGA。
+     * 仅使用驱动公布的格式，不修改传感器寄存器表。 */
+    s_width = photo ? 640 : PREVIEW_WIDTH;
+    s_height = photo ? 480 : PREVIEW_HEIGHT;
+    bool found = false;
+
+    for (unsigned index = 0;; ++index)
+    {
+        struct v4l2_sensor_format_enum entry = {.index = index};
+
+        if (0 != ioctl(s_fd, VIDIOC_ENUM_SENSOR_FMT, &entry))
+        {
+            break;
+        }
+
+        if ((entry.format.width == s_width) && (entry.format.height == s_height)
+            && (entry.format.format == ESP_CAM_SENSOR_PIXFORMAT_RGB565_BE))
+        {
+            ESP_RETURN_ON_FALSE(
+                0 == ioctl(s_fd, VIDIOC_S_SENSOR_FMT, &entry.format), ESP_FAIL,
+                kTag, "set sensor format");
+            found = true;
+            break;
+        }
+    }
+
+    ESP_RETURN_ON_FALSE(found, ESP_ERR_NOT_SUPPORTED, kTag,
+                        "missing capture mode");
+
     /* Kconfig 固定原生 RGB565 BE；读取格式再次验证，避免误显示 YUV。
      * 同时记录传感器格式的标称 FPS 和 XCLK，区分实测 FPS。 */
     esp_cam_sensor_format_t sensor = {0};
@@ -106,26 +139,26 @@ esp_err_t CameraInit(i2c_master_bus_handle_t bus)
     struct v4l2_format format = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
     /* 读取当前原生格式，不请求驱动执行额外软件颜色转换。
      * RGB565X 指大端 RGB565，与屏幕的线传输顺序匹配。
-     * 其他分辨率不能直接按屏幕尺寸读取，否则可能跨行越界。
+     * 按当前模式验证尺寸，避免最大分辨率帧按屏幕尺寸读取。
      * 尺寸和格式验证失败时返回，不创建不匹配的采集缓冲。
      * 每行有效跨度以驱动返回值为准，零值才用原生紧凑布局。 */
     ESP_RETURN_ON_FALSE(0 == ioctl(s_fd, VIDIOC_G_FMT, &format), ESP_FAIL, kTag,
                         "capture format");
     ESP_RETURN_ON_FALSE(
-        (PREVIEW_WIDTH == format.fmt.pix.width)
-            && (PREVIEW_HEIGHT == format.fmt.pix.height)
+        (s_width == format.fmt.pix.width) && (s_height == format.fmt.pix.height)
             && (V4L2_PIX_FMT_RGB565X == format.fmt.pix.pixelformat),
-        ESP_ERR_NOT_SUPPORTED, kTag, "expected 320x240 RGB565 BE");
+        ESP_ERR_NOT_SUPPORTED, kTag,
+        "unexpected capture dimensions or RGB565 byte order");
     s_stride = format.fmt.pix.bytesperline;
 
     /* 部分版本的 V4L2 层未填 bytesperline；原生无填充 RGB565 用 640。 */
     if (0 == s_stride)
     {
-        s_stride = PREVIEW_WIDTH * 2;
+        s_stride = s_width * 2;
     }
 
-    ESP_RETURN_ON_FALSE(s_stride >= (PREVIEW_WIDTH * 2), ESP_ERR_INVALID_SIZE,
-                        kTag, "invalid stride");
+    ESP_RETURN_ON_FALSE(s_stride >= (s_width * 2), ESP_ERR_INVALID_SIZE, kTag,
+                        "invalid stride");
     ESP_LOGI(kTag, "format=" V4L2_FMT_STR " width=%lu height=%lu stride=%u",
              V4L2_FMT_STR_ARG(format.fmt.pix.pixelformat),
              (unsigned long)format.fmt.pix.width,
@@ -159,7 +192,7 @@ esp_err_t CameraInit(i2c_master_bus_handle_t bus)
         };
         ESP_RETURN_ON_FALSE(0 == ioctl(s_fd, VIDIOC_QUERYBUF, &buffer),
                             ESP_FAIL, kTag, "query buffer");
-        ESP_RETURN_ON_FALSE(buffer.length >= (s_stride * PREVIEW_HEIGHT),
+        ESP_RETURN_ON_FALSE(buffer.length >= (s_stride * s_height),
                             ESP_ERR_INVALID_SIZE, kTag, "short mapping");
         s_buffers[i] = mmap(NULL, buffer.length, PROT_READ | PROT_WRITE,
                             MAP_SHARED, s_fd, buffer.m.offset);
@@ -214,9 +247,11 @@ esp_err_t CameraGet(CameraFrame *frame)
     frame->index = buffer.index;
     frame->length = buffer.bytesused;
     frame->stride = s_stride;
+    frame->width = s_width;
+    frame->height = s_height;
     frame->valid = ((buffer.flags & V4L2_BUF_FLAG_DONE) != 0)
                    && ((buffer.flags & V4L2_BUF_FLAG_ERROR) == 0)
-                   && (frame->length >= (s_stride * PREVIEW_HEIGHT))
+                   && (frame->length >= (s_stride * s_height))
                    && (frame->length <= s_capacities[buffer.index]);
     return ESP_OK;
 }
@@ -288,4 +323,15 @@ esp_err_t CameraStop(void)
     memset(s_borrowed, 0, sizeof(s_borrowed));
     s_stride = 0;
     return ESP_OK;
+}
+
+/**
+ * @authors Codex
+ * @brief 使用屏幕分辨率初始化预览，保留原调用接口。
+ * @param bus 有效共享总线，不转移所有权。
+ * @return 初始化结果，失败需调用 CameraStop。
+ */
+esp_err_t CameraInit(i2c_master_bus_handle_t bus)
+{
+    return CameraInitMode(bus, false);
 }

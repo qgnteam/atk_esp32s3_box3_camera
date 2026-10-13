@@ -21,6 +21,8 @@ typedef struct
     const uint8_t *data; /* 驱动拥有的 PSRAM 数据，RGB565 大端。 */
     size_t length;       /* 有效字节数，不能大于映射容量。 */
     size_t stride;       /* 每行字节跨度，不是像素数。 */
+    unsigned width;      /* 当前帧宽度，像素。 */
+    unsigned height;     /* 当前帧高度，像素。 */
     unsigned index;      /* 归还令牌，取到帧后不可修改。 */
     bool valid;          /* 完成标志与帧长度均通过检查。 */
 } CameraFrame;
@@ -32,6 +34,14 @@ typedef struct
  * @return ESP_OK 或错误；失败由 CameraStop 回收已创建资源。
  */
 esp_err_t CameraInit(i2c_master_bus_handle_t bus);
+/**
+ * @authors Codex
+ * @brief 无借用帧且停止后初始化指定采集模式。
+ * @param bus 有效共享总线，不转移所有权。
+ * @param photo true 使用最大 VGA，false 使用 QVGA。
+ * @return 初始化结果；失败须 CameraStop 回收。
+ */
+esp_err_t CameraInitMode(i2c_master_bus_handle_t bus, bool photo);
 
 /**
  * @authors Codex

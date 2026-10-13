@@ -44,4 +44,11 @@ bool StorageIsRecording(void);
  * @return ESP_OK或LCD错误，等待所有DMA完成。
  */
 esp_err_t StorageDraw(const CameraFrame *frame);
+/**
+ * @authors Codex
+ * @brief 预览帧全部归还后执行待处理拍照并恢复预览。
+ * @param bus 有效共享总线，不转移所有权。
+ * @return 预览恢复结果，失败须停止相机。
+ */
+esp_err_t StorageCapturePending(i2c_master_bus_handle_t bus);
 #endif

@@ -61,4 +61,11 @@ esp_err_t LcdShowText(const char *lines);
  * @return ESP_OK或LCD错误，等待全部DMA完成。
  */
 esp_err_t LcdDrawImage(const uint8_t *pixels);
+/**
+ * @authors Codex
+ * @brief 设置快门白色反馈，不改变相机帧。
+ * @param enabled 是否启用白色混合，仅主任务调用。
+ * @return None。
+ */
+void LcdSetFlash(bool enabled);
 #endif

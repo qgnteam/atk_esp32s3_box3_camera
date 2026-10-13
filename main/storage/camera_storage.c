@@ -79,6 +79,14 @@ static bool s_audio_ready = false;
 static bool s_audio_active = false;
 static CameraUi s_ui = {0};
 static char s_notice[40] = {0};
+/* 快门请求在预览帧归还后执行；提示计时从第一次成功绘制开始。 */
+static bool s_photo_pending = false;
+static int64_t s_saved_until = 0;
+#define PHOTO_NOTICE_US (3000000)
+/* 快门反馈最低 500 ms；慢卡不额外追加固定延时。 */
+#define PHOTO_FEEDBACK_MIN_US (500000)
+static int64_t s_feedback_started = 0;
+
 /* 浏览器只打开本目录下的BMP/AVI，拒绝越界尺寸和超大音轨。
  * 图像缓冲为已经校正方向的RGB565，不重复水平镜像。
  * PCM缓冲直到播放任务退出才释放；不会与录音同时运行。 */
@@ -885,7 +893,7 @@ static void StartVideo(void)
 
 /**
  * @authors Codex
- * @brief 以当前有效相机帧保存BMP；文件方向与取景一致。
+ * @brief 以最大分辨率有效相机帧保存BMP；文件方向与取景一致。
  * @details
  * 照片操作先正常结束正在进行的录像。
  * 如果视频错误收尾卸载了卡，拍照会再次检查卡状态。
@@ -911,17 +919,35 @@ static void TakePhoto(const CameraFrame *frame)
 
     if (NULL == photo)
     {
+        snprintf(s_notice, sizeof(s_notice), "PHOTO FAILED");
         ESP_LOGE(kTag, "cannot create photo errno=%d", errno);
         return;
     }
 
     uint8_t header[54] = {0};
     MediaBmpHeader(header);
+    /* 最大分辨率照片单独填写尺寸，录像继续使用 QVGA。 */
+    uint32_t image_bytes = frame->width * frame->height * 3;
+    MediaPut32(header + 2, 54 + image_bytes);
+    MediaPut32(header + 18, frame->width);
+    MediaPut32(header + 22, frame->height);
+    MediaPut32(header + 34, image_bytes);
     bool valid = (fwrite(header, 1, sizeof(header), photo) == sizeof(header))
-                 && WritePixels(photo, frame);
+                 && frame->valid;
+
+    /* VGA 行为 1920 字节，复用现有 15 KiB 缓冲，不申请整帧副本。 */
+    for (unsigned row = 0; valid && (row < frame->height); ++row)
+    {
+        MediaConvertRowWidth(frame->data
+                                 + ((frame->height - 1 - row) * frame->stride),
+                             s_pixels, frame->width);
+        valid =
+            fwrite(s_pixels, 1, frame->width * 3, photo) == frame->width * 3;
+    }
     valid = PublishFile(photo, path, "BMP", valid);
     snprintf(s_notice, sizeof(s_notice), "%s",
              valid ? "PHOTO SAVED" : "PHOTO FAILED");
+    s_saved_until = valid ? -1 : 0;
     s_ui.dirty = true;
 }
 
@@ -1173,9 +1199,11 @@ static bool CloseViewer(void)
  * @authors Codex
  * @brief 从文件读取底部优先BGR24帧，转换成已校正方向的RGB565。
  * @param offset 像素起始字节偏移，已在文件解析时验证。
+ * @param width 已校验源宽度，320 或 640 像素。
+ * @param height 已校验源高度，240 或 480 像素。
  * @return 是否完整读取；错误不显示部分图像。
  */
-static bool ReadImage(uint32_t offset)
+static bool ReadImageSized(uint32_t offset, unsigned width, unsigned height)
 {
     if (fseek(s_play_file, offset, SEEK_SET) != 0)
     {
@@ -1184,8 +1212,11 @@ static bool ReadImage(uint32_t offset)
 
     for (unsigned row = 0; row < MEDIA_HEIGHT; ++row)
     {
-        if (fread(s_pixels, 1, MEDIA_WIDTH * 3, s_play_file)
-            != (MEDIA_WIDTH * 3))
+        /* 最新修改：VGA 照片抽样到屏幕尺寸，旧照片和录像保持原尺寸。 */
+        unsigned source_row = (row * height) / MEDIA_HEIGHT;
+
+        if ((fseek(s_play_file, offset + source_row * width * 3, SEEK_SET) != 0)
+            || (fread(s_pixels, 1, width * 3, s_play_file) != width * 3))
         {
             return false;
         }
@@ -1199,9 +1230,10 @@ static bool ReadImage(uint32_t offset)
 
         for (unsigned column = 0; column < MEDIA_WIDTH; ++column)
         {
-            uint16_t color = ((uint16_t)(s_pixels[column * 3 + 2] >> 3) << 11)
-                             | ((uint16_t)(s_pixels[column * 3 + 1] >> 2) << 5)
-                             | (s_pixels[column * 3] >> 3);
+            unsigned sample = ((column * width) / MEDIA_WIDTH) * 3;
+            uint16_t color = ((uint16_t)(s_pixels[sample + 2] >> 3) << 11)
+                             | ((uint16_t)(s_pixels[sample + 1] >> 2) << 5)
+                             | (s_pixels[sample] >> 3);
             destination[column * 2] = color >> 8;
             destination[column * 2 + 1] = (uint8_t)color;
         }
@@ -1353,7 +1385,7 @@ static bool LoadAvi(const uint8_t *header, uint32_t file_bytes)
     s_play_period = period;
     s_play_next = 0;
     /* 首帧先读入，避免播放开始后才等待整帧读卡造成起始错位。 */
-    if (!ReadImage(s_play_offsets[0]))
+    if (!ReadImageSized(s_play_offsets[0], MEDIA_WIDTH, MEDIA_HEIGHT))
     {
         return false;
     }
@@ -1426,12 +1458,17 @@ static void OpenSelected(void)
 
     if (valid && bmp)
     {
-        valid = (Get32(header + 2) == (uint32_t)info.st_size)
-                && (Get32(header + 10) == 54) && (Get32(header + 14) == 40)
-                && (Get32(header + 18) == MEDIA_WIDTH)
-                && (Get32(header + 22) == MEDIA_HEIGHT) && (header[26] == 1)
-                && (header[28] == 24) && (Get32(header + 30) == 0)
-                && (info.st_size == 54 + MEDIA_FRAME_BYTES) && ReadImage(54);
+        valid =
+            (Get32(header + 2) == (uint32_t)info.st_size)
+            && (Get32(header + 10) == 54) && (Get32(header + 14) == 40)
+            && (((Get32(header + 18) == MEDIA_WIDTH)
+                 && (Get32(header + 22) == MEDIA_HEIGHT))
+                || ((Get32(header + 18) == 640) && (Get32(header + 22) == 480)))
+            && (header[26] == 1) && (header[28] == 24)
+            && (Get32(header + 30) == 0)
+            && (info.st_size
+                == 54 + Get32(header + 18) * Get32(header + 22) * 3)
+            && ReadImageSized(54, Get32(header + 18), Get32(header + 22));
     }
     else if (valid && (memcmp(header, "RIFF", 4) == 0)
              && (memcmp(header + 8, "AVI ", 4) == 0))
@@ -1746,7 +1783,12 @@ void StorageProcess(const CameraFrame *frame)
     switch (action)
     {
     case UI_ACTION_PHOTO:
-        TakePhoto(frame);
+        s_notice[0] = '\0';
+        s_saved_until = 0;
+        s_photo_pending = true;
+        s_feedback_started = 0;
+        LcdSetFlash(true);
+        ESP_LOGI(kTag, "PHOTO_FEEDBACK requested");
         break;
     case UI_ACTION_RECORD:
         if (NULL != s_video)
@@ -1842,7 +1884,8 @@ void StorageProcess(const CameraFrame *frame)
         }
         else if (target >= s_play_next)
         {
-            if (!ReadImage(s_play_offsets[target]))
+            if (!ReadImageSized(s_play_offsets[target], MEDIA_WIDTH,
+                                MEDIA_HEIGHT))
             {
                 CloseViewer();
                 s_ui.screen = UI_BROWSER;
@@ -1881,12 +1924,42 @@ esp_err_t StorageDraw(const CameraFrame *frame)
 
     if (s_ui.screen == UI_PREVIEW)
     {
+        /* 只有实际显示过成功提示才开始计时，不把写卡时间计入。 */
+        if ((s_saved_until > 0) && (esp_timer_get_time() >= s_saved_until))
+        {
+            /* 提示被其他操作替换时，只结束旧计时，不擦除新错误。 */
+            if (strcmp(s_notice, "PHOTO SAVED") == 0)
+            {
+                s_notice[0] = '\0';
+            }
+
+            /* 诊断使用微秒计时，便于实板核对三秒提示，不延迟取景。 */
+            ESP_LOGI(kTag, "PHOTO_NOTICE expired elapsed_us=%" PRId64,
+                     esp_timer_get_time() - (s_saved_until - PHOTO_NOTICE_US));
+            s_saved_until = 0;
+        }
+
         char caption[40] = {0};
         snprintf(caption, sizeof(caption), "%s%s %.26s",
                  s_ui.video_mode ? "VIDEO" : "PHOTO",
                  StorageIsRecording() ? " REC" : "", s_notice);
         LcdSetCaption(caption);
-        return LcdDrawFrame(frame->data, frame->stride, StorageIsRecording());
+        esp_err_t drawn =
+            LcdDrawFrame(frame->data, frame->stride, StorageIsRecording());
+
+        /* 以高亮帧实际完成绘制为起点，不计入按键及 DMA 提交时间。 */
+        if ((ESP_OK == drawn) && s_photo_pending && (0 == s_feedback_started))
+        {
+            s_feedback_started = esp_timer_get_time();
+        }
+
+        if ((ESP_OK == drawn) && (-1 == s_saved_until))
+        {
+            s_saved_until = esp_timer_get_time() + PHOTO_NOTICE_US;
+            ESP_LOGI(kTag, "PHOTO_NOTICE shown hold_us=%d", PHOTO_NOTICE_US);
+        }
+
+        return drawn;
     }
 
     if (!s_ui.dirty)
@@ -1933,4 +2006,87 @@ esp_err_t StorageDraw(const CameraFrame *frame)
     }
 
     return LcdShowText(text);
+}
+
+/**
+ * @authors Codex
+ * @brief 归还预览帧后执行最大分辨率拍照并恢复预览。
+ * @details 单任务调用，进入时不得持有相机帧；所有错误均尝试恢复。
+ * @param bus 非空共享总线，不转移所有权。
+ * @return 预览恢复结果；保存失败通过提示显示。
+ */
+esp_err_t StorageCapturePending(i2c_master_bus_handle_t bus)
+{
+    if (!s_photo_pending)
+    {
+        return ESP_OK;
+    }
+
+    s_photo_pending = false;
+    StorageStop();
+    esp_err_t result = CameraStop();
+
+    if (ESP_OK != result)
+    {
+        LcdSetFlash(false);
+        return result;
+    }
+
+    result = CameraInitMode(bus, true);
+    CameraFrame photo_frame = {0};
+
+    /* 丢弃最初两帧，让复位后的曝光和格式稳定；每帧及时归还。 */
+    for (unsigned pass = 0; (ESP_OK == result) && (pass < 3); ++pass)
+    {
+        result = CameraGet(&photo_frame);
+
+        if (ESP_OK == result)
+        {
+            if (pass == 2)
+            {
+                if (photo_frame.valid)
+                {
+                    TakePhoto(&photo_frame);
+                }
+                else
+                {
+                    result = ESP_FAIL;
+                }
+            }
+
+            esp_err_t returned = CameraReturn(&photo_frame);
+
+            if (ESP_OK != returned)
+            {
+                result = returned;
+            }
+        }
+    }
+
+    if (ESP_OK != result)
+    {
+        snprintf(s_notice, sizeof(s_notice), "PHOTO FAILED");
+        s_saved_until = 0;
+        ESP_LOGE(kTag, "photo capture failed: %s", esp_err_to_name(result));
+    }
+
+    /* 最新修改：写卡完成后只补足 0.5 秒最低反馈时间。
+     * TF 保存已超过最低时长时立即继续恢复，不额外等待。
+     * 高亮帧已留在 LCD GRAM，等待期间无需持有预览帧。 */
+    int64_t remaining_us =
+        PHOTO_FEEDBACK_MIN_US - (esp_timer_get_time() - s_feedback_started);
+
+    if ((s_feedback_started > 0) && (remaining_us > 0))
+    {
+        vTaskDelay(pdMS_TO_TICKS((remaining_us + 999) / 1000) + 1);
+    }
+
+    ESP_LOGI(kTag, "PHOTO_FEEDBACK complete elapsed_us=%" PRId64,
+             esp_timer_get_time() - s_feedback_started);
+    s_feedback_started = 0;
+
+    /* 保存成功或失败都恢复屏幕尺寸；停止失败禁止再次初始化。 */
+    esp_err_t stopped = CameraStop();
+    LcdSetFlash(false);
+    return (ESP_OK == stopped) ? CameraInit(bus) : stopped;
 }

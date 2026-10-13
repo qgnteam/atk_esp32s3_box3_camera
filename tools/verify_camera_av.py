@@ -140,7 +140,7 @@ def main():
             results["photo"] = wait_for(r"SAVED (\S+\.BMP)").group(1)
             command("v")
             checked = wait_for(r"FILE_VERIFY .*bytes=(\d+) expected=(\d+) crc=([0-9a-f]+) valid=(\d+)")
-            assert checked.group(1) == checked.group(2) == "230454" and checked.group(4) == "1"
+            assert checked.group(1) == checked.group(2) == "921654" and checked.group(4) == "1"
             bmp = export_file(out/"photo.bmp",checked.group(3))
             assert bmp[:2] == b"BM" and u32(bmp,2) == len(bmp)
             command("l")

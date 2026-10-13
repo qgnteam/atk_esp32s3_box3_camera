@@ -67,7 +67,7 @@ def main():
             name = wait_for(r"SAVED (\S+\.BMP)").group(1)
             port.write(b"v\n")
             checked = wait_for(r"FILE_VERIFY path=(\S+) bytes=(\d+) expected=(\d+) crc=([0-9a-f]+) valid=(\d+)")
-            assert checked.group(1) == name and checked.group(2) == "230454"
+            assert checked.group(1) == name and checked.group(2) == "921654"
             assert checked.group(2) == checked.group(3) and checked.group(5) == "1"
             results["photos"].append(name)
             results["checks"].append(checked.group(0))

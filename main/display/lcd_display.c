@@ -27,6 +27,7 @@
 #define LCD_TIMEOUT_MS (1000)
 #define LCD_SPI_HZ     (60000000)
 
+static bool s_flash = false; /* 快门反馈只作用于 LCD，禁止修改保存像素。 */
 static char s_caption[40] = {0};
 static const char *kTag = "lcd";
 static esp_lcd_panel_handle_t s_panel = NULL;
@@ -257,6 +258,24 @@ static esp_err_t DrawPixels(const uint8_t *frame, size_t stride, bool recording,
             }
         }
 
+        /* 最新修改：将整幅显示与白色混合四分之一，保留画面内容。 */
+        if (s_flash)
+        {
+            for (unsigned offset = 0; offset < STRIP_BYTES; offset += 2)
+            {
+                uint16_t pixel =
+                    ((uint16_t)strip[offset] << 8) | strip[offset + 1];
+                unsigned red = (pixel >> 11) & 31;
+                unsigned green = (pixel >> 5) & 63;
+                unsigned blue = pixel & 31;
+                pixel = ((red + ((31 - red + 3) / 4)) << 11)
+                        | ((green + ((63 - green + 3) / 4)) << 5)
+                        | (blue + ((31 - blue + 3) / 4));
+                strip[offset] = pixel >> 8;
+                strip[offset + 1] = (uint8_t)pixel;
+            }
+        }
+
         ESP_RETURN_ON_ERROR(SubmitStrip(y, strip), kTag, "submit frame");
     }
 
@@ -368,4 +387,15 @@ esp_err_t LcdShowText(const char *lines)
     }
 
     return WaitTransfer();
+}
+
+/**
+ * @authors Codex
+ * @brief 设置当前显示的快门白色反馈，仅主任务调用。
+ * @param enabled true 启用白色混合。
+ * @return None。
+ */
+void LcdSetFlash(bool enabled)
+{
+    s_flash = enabled;
 }

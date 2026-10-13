@@ -39,9 +39,12 @@ static uint32_t Get32(const uint8_t *bytes)
  * @param file 非空只读文件，返回时文件仍由调用者关闭。
  * @param file_bytes 实际文件长度，字节。
  * @param pixels 非空首帧像素偏移输出。
- * @return 是否找到完整可用的320x240 BGR24首帧。
+ * @param width 非空源宽度输出，AVI 保留调用者的 QVGA 初值。
+ * @param height 非空源高度输出，AVI 保留调用者的 QVGA 初值。
+ * @return 是否找到完整可用的 QVGA/VGA BGR24 首帧。
  */
-static bool FindPixels(FILE *file, uint32_t file_bytes, uint32_t *pixels)
+static bool FindPixels(FILE *file, uint32_t file_bytes, uint32_t *pixels,
+                       unsigned *width, unsigned *height)
 {
     uint8_t header[MEDIA_AV_HEADER_BYTES] = {0};
 
@@ -52,13 +55,17 @@ static bool FindPixels(FILE *file, uint32_t file_bytes, uint32_t *pixels)
 
     if ((header[0] == 'B') && (header[1] == 'M'))
     {
-        bool valid =
-            (file_bytes == 54 + MEDIA_FRAME_BYTES)
-            && (Get32(header + 2) == file_bytes) && (Get32(header + 10) == 54)
-            && (Get32(header + 14) == 40) && (Get32(header + 18) == MEDIA_WIDTH)
-            && (Get32(header + 22) == MEDIA_HEIGHT) && (header[26] == 1)
-            && (header[27] == 0) && (header[28] == 24) && (header[29] == 0)
-            && (Get32(header + 30) == 0);
+        *width = Get32(header + 18);
+        *height = Get32(header + 22);
+        /* 最新修改：同时接受旧 QVGA 和最大分辨率 VGA 照片。 */
+        bool valid = (file_bytes == 54 + (*width) * (*height) * 3)
+                     && (Get32(header + 2) == file_bytes)
+                     && (Get32(header + 10) == 54) && (Get32(header + 14) == 40)
+                     && (((*width == MEDIA_WIDTH) && (*height == MEDIA_HEIGHT))
+                         || ((*width == 640) && (*height == 480)))
+                     && (header[26] == 1) && (header[27] == 0)
+                     && (header[28] == 24) && (header[29] == 0)
+                     && (Get32(header + 30) == 0);
         *pixels = 54;
         return valid;
     }
@@ -175,17 +182,17 @@ bool MediaThumbnailRead(const char *path, uint8_t *output, uint8_t *work,
             && (size <= THUMB_MAX_FILE_BYTES)
             && (fseek(file, 0, SEEK_SET) == 0);
     uint32_t pixels = 0;
-    valid = valid && FindPixels(file, (uint32_t)size, &pixels);
+    unsigned width = MEDIA_WIDTH;
+    unsigned height = MEDIA_HEIGHT;
+    valid = valid && FindPixels(file, (uint32_t)size, &pixels, &width, &height);
+    valid = valid && (work_bytes >= width * 3);
 
     for (unsigned row = 0; valid && (row < MEDIA_THUMB_HEIGHT); ++row)
     {
-        unsigned source_y =
-            ((row * 2 + 1) * MEDIA_HEIGHT) / (MEDIA_THUMB_HEIGHT * 2);
-        uint32_t offset =
-            pixels + (MEDIA_HEIGHT - 1 - source_y) * MEDIA_THUMB_WORK_BYTES;
+        unsigned source_y = ((row * 2 + 1) * height) / (MEDIA_THUMB_HEIGHT * 2);
+        uint32_t offset = pixels + (height - 1 - source_y) * width * 3;
         valid = (fseek(file, offset, SEEK_SET) == 0)
-                && (fread(work, 1, MEDIA_THUMB_WORK_BYTES, file)
-                    == MEDIA_THUMB_WORK_BYTES);
+                && (fread(work, 1, width * 3, file) == width * 3);
 
         if (!valid)
         {
@@ -196,7 +203,7 @@ bool MediaThumbnailRead(const char *path, uint8_t *output, uint8_t *work,
         for (unsigned column = 0; column < MEDIA_THUMB_WIDTH; ++column)
         {
             unsigned source_x =
-                ((column * 2 + 1) * MEDIA_WIDTH) / (MEDIA_THUMB_WIDTH * 2);
+                ((column * 2 + 1) * width) / (MEDIA_THUMB_WIDTH * 2);
             const uint8_t *sample = work + source_x * 3;
             uint16_t color = ((uint16_t)(sample[2] >> 3) << 11)
                              | ((uint16_t)(sample[1] >> 2) << 5)

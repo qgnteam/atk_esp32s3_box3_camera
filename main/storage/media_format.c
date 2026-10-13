@@ -119,15 +119,16 @@ void MediaAviHeader(uint8_t *header, uint32_t frames, uint32_t period_us)
  * @param output 非空 BGR24 输出行。
  * @return None
  */
-void MediaConvertRow(const uint8_t *source, uint8_t *output)
+void MediaConvertRowWidth(const uint8_t *source, uint8_t *output,
+                          unsigned width)
 {
     /* 取反后的 x 与 LCD 使用相同映射；复制完整像素避免交换字节。
      * 低位补齐采用位复制，将 5/6 位颜色映射到完整 8 位范围。
      * 输出先蓝后绿后红，符合 Windows 位图的 BGR 排列。
      * 行的上下顺序由写文件调用者控制，不在此处隐式翻转。 */
-    for (unsigned x = 0; x < MEDIA_WIDTH; ++x)
+    for (unsigned x = 0; x < width; ++x)
     {
-        unsigned offset = (MEDIA_WIDTH - 1 - x) * 2;
+        unsigned offset = (width - 1 - x) * 2;
         uint16_t pixel = ((uint16_t)source[offset] << 8) | source[offset + 1];
         uint8_t blue = pixel & 31;
         uint8_t green = (pixel >> 5) & 63;
@@ -188,4 +189,16 @@ void MediaAvHeader(uint8_t *header, uint32_t frames, uint32_t period_us,
     memcpy(header + 312, "LIST", 4);
     MediaPut32(header + 316, 4 + movi_bytes);
     memcpy(header + 320, "movi", 4);
+}
+
+/**
+ * @authors Codex
+ * @brief 保留录像的 QVGA 行转换接口。
+ * @param source 非空 640 字节输入行。
+ * @param output 非空 960 字节输出行。
+ * @return None。
+ */
+void MediaConvertRow(const uint8_t *source, uint8_t *output)
+{
+    MediaConvertRowWidth(source, output, MEDIA_WIDTH);
 }

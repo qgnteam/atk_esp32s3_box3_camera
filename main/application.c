@@ -164,7 +164,7 @@ void ApplicationStart(void)
     int64_t startup = esp_timer_get_time();
     i2c_master_bus_handle_t bus = NULL;
     unsigned recovery_attempts = 0;
-    ESP_LOGI(kTag, "camera-storage v2.3-keys state=INITIALIZING");
+    ESP_LOGI(kTag, "camera-storage v2.4-photo state=INITIALIZING");
     ESP_LOGI(kTag, "PSRAM capacity=%u",
              (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     esp_err_t result = BoardInit(&bus);
@@ -353,7 +353,21 @@ void ApplicationStart(void)
             break;
         }
 
-        last_valid = end;
+        /* 最新修改：相机没有借用帧时才允许改变分辨率和缓冲。 */
+        result = StorageCapturePending(bus);
+
+        if (ESP_OK != result)
+        {
+            StorageStop();
+            result = RecoverCamera(bus, &recovery_attempts);
+
+            if (ESP_OK != result)
+            {
+                break;
+            }
+        }
+
+        last_valid = esp_timer_get_time();
         ++shown;
         ++total;
         display_sum += end - begin;

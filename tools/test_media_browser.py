@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory(dir=OUT) as directory:
     def thumbnail(path, capacity=960):
         guarded = (Byte * (3456+16))(*([0x5A]*(3456+16)))
         pointer = ctypes.cast(ctypes.byref(guarded, 8), Pointer)
-        work = (Byte * 960)()
+        work = (Byte * max(960, capacity))()
         valid = lib.MediaThumbnailRead(str(path).encode(), pointer, work, capacity)
         assert bytes(guarded[:8]) == b"\x5A"*8 and bytes(guarded[-8:]) == b"\x5A"*8
         return valid, bytes(guarded[8:-8])
@@ -144,6 +144,17 @@ with tempfile.TemporaryDirectory(dir=OUT) as directory:
         previews.append(data)
     assert previews[0] == previews[1] == previews[2]
     assert thumbnail(bmp_path, 959) == (False, bytes(3456))
+    # VGA must decode every sampled pixel and reject insufficient row capacity.
+    vga_header = bytearray(bytes(h))
+    for offset, value in ((2, 54+640*480*3), (18, 640), (22, 480), (34, 640*480*3)):
+        struct.pack_into("<I", vga_header, offset, value)
+    vga_path = OUT / "vga.bmp"
+    vga_path.write_bytes(vga_header + b"".join(bgr(x//2, y//2)
+                                             for y in reversed(range(480)) for x in range(640)))
+    assert thumbnail(vga_path, 1920) == (True, previews[0])
+    assert thumbnail(vga_path, 1919) == (False, bytes(3456))
+    assert thumbnail(vga_path, 960) == (False, bytes(3456))
+
     invalids = [bmp[:100], new_avi[:400]]
     for base, offset, value in ((bmp, 18, 319), (bmp,22,0xFFFFFF10),
                                 (new_avi,328,0xFFFFFFFE), (new_avi,316,0xFFFFFFFF),

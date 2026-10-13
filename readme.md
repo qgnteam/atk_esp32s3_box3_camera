@@ -1,6 +1,6 @@
 # ATK ESP32-S3 BOX3 相机
 
-当前版本 `camera-storage v2.3-keys`：GC0308 → ESP32-S3 → ST7789，320×240 横屏取景。支持 BMP 拍照、带 PCM 声音的 AVI 录像、设备端照片查看及录像回放。TF 卡仅接受实际 **exFAT 或 FAT32**，不将 FAT12/FAT16 当作 FAT32。当前开发板卡为 FAT32。
+当前版本 `camera-storage v2.4-photo`：GC0308 → ESP32-S3 → ST7789，320×240 横屏取景。支持 BMP 拍照、带 PCM 声音的 AVI 录像、设备端照片查看及录像回放。TF 卡仅接受实际 **exFAT 或 FAT32**，不将 FAT12/FAT16 当作 FAT32。当前开发板卡为 FAT32。
 
 ## 三键操作
 
@@ -16,7 +16,7 @@
 
 屏幕使用英文点阵：`PHOTO` 拍照，`VIDEO` 录像模式，`REC` 和右上角红方块表示正在录制，`MEDIA` 文件列表，`CANCEL` 取消。菜单以每页四行显示文件，左侧为48×36缩略图，右侧为文件名及PHOTO/VIDEO类型，蓝色高亮当前选中项，标题显示“当前位置/总文件数”。底部同一行提示按 `K0: DOWN`、`K1: UP`、`K2: OPEN`、`HOLD K2: CANCEL` 的顺序显示。K1/K0逐项上下移动，跨页自动滚动，到两端循环选择。照片缩略图来自原图，录像缩略图来自第一帧；同页移动复用预览缓存，跨页才读取新文件。损坏或不支持的媒体显示类型占位图及NO PREVIEW，不阻止其他文件浏览。
 
-打开照片后保持显示，视频播放结束自动回到原选中列表页；返回列表保留预览，退出到取景后释放菜单图像及缩略图内存。支持本项目320×240的24位BMP，以及原单视频AVI和新版带PCM音轨AVI；其他编码、尺寸或损坏文件打开时显示错误。
+打开照片后保持显示，视频播放结束自动回到原选中列表页；返回列表保留预览，退出到取景后释放菜单图像及缩略图内存。支持本项目320×240及640×480的24位BMP，以及原单视频AVI和新版带PCM音轨AVI；其他编码、尺寸或损坏文件打开时显示错误。
 
 本次底部提示顺序检查使用卡上已有39个文件，未新增或删除TF文件。实测界面见[当前菜单截图](outputs/board-footer-single/menu.png)，验证记录见[当前测试报告](docs-codex/test-report.md)。
 
@@ -30,13 +30,17 @@
 
 ## 图片、录像与声音
 
-照片保存为 `DCIM/IMG00001.BMP` 等编号文件，每张230454字节，24位BGR、底部优先。视频为 `DCIM/VID00001.AVI` 等编号文件，包含未压缩BGR24视频及 **24kHz、16位、单声道PCM** 音轨。ES7210的TDM槽0/MIC1用于录音，ES8311和板上功放用于回放。录音失败或缓冲溢出会使本次录像失败，程序不会静默降级成无声录像。
+照片保存为 `DCIM/IMG00001.BMP` 等编号文件，640×480，每张921654字节，24位BGR、底部优先。视频为 `DCIM/VID00001.AVI` 等编号文件，包含未压缩BGR24视频及 **24kHz、16位、单声道PCM** 音轨。ES7210的TDM槽0/MIC1用于录音，ES8311和板上功放用于回放。录音失败或缓冲溢出会使本次录像失败，程序不会静默降级成无声录像。
 
 录像最高采样5FPS，实际受卡速、图像转换和显示影响，当前卡实测约1.4–1.5FPS。音频独立任务持续采样，4秒PSRAM环形缓冲吸收写卡延迟，DMA及软件缓冲溢出都检查。最长60秒或300帧自动结束。音频始终保持24kHz，视频按实际PCM时长计算平均播放周期；AVI为恒定帧率，不逐帧保存可变采样间隔。
 
 文件完整写入、同步并关闭后才将 `.TMP` 改为 `.BMP` / `.AVI`，重启跳过已有最终文件和遗留TMP。录像中断电或测试复位可能留下不能直接播放的TMP，本版不做掉电恢复，也不自动删除历史文件。照片/录像不保存取景标题和REC标记。
 
 回放先预载PCM到PSRAM（最多64秒），独立任务驱动扬声器；主任务按播放时钟读视频，读卡过慢会跳过落后的视频帧。默认回放音量为-12dB。物理声音和画面观感的验证结果见[当前测试报告](docs-codex/test-report.md)。
+
+拍照键经去抖确认后，LCD 将整幅画面与白色混合 25% 作为快门反馈。高亮从实际绘制完成起至少保持 0.5 秒，TF 写入更久时保持到写入结束，不再额外追加固定高亮延时；普通画面在摄像头恢复后刷新。归还预览帧后，摄像头临时切换为 GC0308 最大彩色分辨率 640×480，丢弃最初两帧，保存第三帧原始图像到 TF 卡；保存结束后恢复 320×240 预览。白色反馈和屏幕文字不会写入照片。只有写入、同步、关闭和重命名均成功才显示 `PHOTO SAVED`，从首次成功绘制提示起保持 3 秒，然后恢复普通取景标题。失败显示错误，不显示成功提示。
+
+新建构建目录会从 `sdkconfig.defaults` 同时启用 RGB565_BE 的 QVGA/VGA 格式。已有构建若未启用 VGA，请在 `idf.py menuconfig` 的 GC0308 配置中启用 `CONFIG_CAMERA_GC0308_DVP_RGB565_BE_640X480_16FPS`，保留 QVGA 为默认格式，再执行 `idf.py build`。
 
 ## 接线与依赖
 
@@ -62,15 +66,18 @@ python tools/test_media_browser.py
 python tools/test_card_format.py
 python tools/serial_verify.py --port /dev/ttyACM0 --seconds 30 --reset --log outputs/serial-av.log
 python tools/verify_media_browser.py --port /dev/ttyACM0 --output outputs/board-remap
+python tools/verify_photo_capture.py --port /dev/ttyACM0 --count 3 --output outputs/photo-capture
 python tools/verify_camera_av.py --port /dev/ttyACM0 --seconds 4 --output outputs/board-av
 python tools/verify_storage.py --port /dev/ttyACM0 --allow-fat --record-seconds 61 --log outputs/storage-auto-stop-av.log
 ```
 
 按实际端口修改 `/dev/ttyACM0`，串口工具不能同时占用设备。下载会替换现有固件。主机测试需要C编译器 `cc`；格式测试的Windows路径保留LLVM实现。列表渲染及完整音视频验收脚本还需要 `ffmpeg` / `ffprobe`，这两个工具仅用于主机解码验证，不进入固件。`test_card_format.py` 在构建生成FatFs覆盖组件后运行，只使用内存磁盘。
 
-当前设备为Espressif 303a:1001。若出现Permission denied，可长期使用 `sudo usermod -aG dialout user1` 后重新登录，或临时执行 `sudo chown user1:dialout /dev/ttyACM0`；设备重连可能恢复权限。本次已编译并烧录，写入哈希验证通过。
+当前设备为Espressif 303a:1001。若出现Permission denied，可长期使用 `sudo usermod -aG dialout user1` 后重新登录，或临时执行 `sudo chown user1:dialout /dev/ttyACM0`；设备重连可能恢复权限。本次修改已编译并通过 USB 烧录至 `/dev/ttyACM0`，写入哈希校验通过；实板连续拍照、3 秒提示计时、照片读回与音视频回放验证通过。
 
 `verify_media_browser.py` 只读已有文件，验证列表翻页、缩略图缓存、照片/录像打开返回及退出内存回收，导出实际菜单RGB565图并核对CRC；测试结束让设备停留在第一列表页。
+
+`verify_photo_capture.py` 默认新增三张照片，逐次核对 VGA 采集、QVGA 恢复、文件完整读回，以及从实际绘制起计时的 3 秒成功提示；测试完成停留在拍照取景页。串口日志记录 PHOTO_FEEDBACK、PHOTO_NOTICE shown/expired，供实板核对顺序和时间。
 
 `verify_camera_av.py` 会新增照片和录像，导出实际文件并核对CRC、音视频块/索引、PCM样本、音视频时长，再用FFmpeg解码并通过设备菜单回放。`verify_storage.py` 默认要求exFAT；当前FAT32卡须显式添加 `--allow-fat`，该结果不算exFAT实卡验收。测试不格式化或删除历史文件。
 
